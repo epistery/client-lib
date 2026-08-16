@@ -14,6 +14,8 @@
     "./Popup": "./Popup.mjs",
     "./component-acl": "./component-acl.mjs",
     "./pool": "./pool.mjs",
+    "./treekem": "./treekem.mjs",
+    "./treekem-kdf": "./treekem-kdf.mjs",
     "./components/*": "./components/*",
     "./package.json": "./package.json"
   },
@@ -27,6 +29,8 @@
     "Popup.mjs",
     "component-acl.mjs",
     "pool.mjs",
+    "treekem.mjs",
+    "treekem-kdf.mjs",
     "components/",
     "README.md"
   ],

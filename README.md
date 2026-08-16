@@ -13,7 +13,19 @@ need by URL, plus one util the wiki plugin also uses server-side. Extracted from
 | `IdForge.mjs` | browser + Node | random / dated id generation |
 | `Toast.mjs` | browser | the one canonical toast/prompt (`window.toast`) |
 | `Popup.mjs` | browser | the one canonical modal (`window.popup`) |
-| `component-acl.mjs` | **Node** | server-side `//ACL` delivery preprocessor + `levelOf(episteryClient)` |
+| `component-acl.mjs` | **Node** | server-side `//ACL` delivery preprocessor + `levelOf(role)` |
+| `treekem-kdf.mjs` | browser + Node | secp256k1 DHKEM + HKDF-SHA256 key schedule (EpisteryDataFrontier); one universal WebCrypto stack |
+| `treekem.mjs` | browser + Node | the ratchet-tree CGKA core (`Member`: commit/apply/Welcome) — the group key that feeds `cipher.mjs` |
+
+## TreeKEM — the frontier's key layer
+
+`treekem-kdf.mjs` + `treekem.mjs` are the production port of the proven P0(b)/P2
+spikes (EpisteryDataFrontier). One dual-environment module: `ethers` is the page
+global (`window.ethers`) in the browser and `globalThis.ethers` in Node, and the
+crypto stack is `globalThis.crypto` (WebCrypto) both places — so a browser rivet
+and a server participant derive the SAME group key by construction. The tree's
+per-epoch **exporter secret is K** for `cipher.mjs`. Commits are ordered by the
+relay's blind Delivery Service (`/ds/...`); this module is the crypto only.
 
 ## componentry — the shared framework
 
