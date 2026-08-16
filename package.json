@@ -8,12 +8,26 @@
     "./cipher": "./cipher.mjs",
     "./markup": "./markup.mjs",
     "./wikiwords": "./wikiwords.mjs",
+    "./componentry": "./componentry.mjs",
+    "./IdForge": "./IdForge.mjs",
+    "./Toast": "./Toast.mjs",
+    "./Popup": "./Popup.mjs",
+    "./component-acl": "./component-acl.mjs",
+    "./pool": "./pool.mjs",
+    "./components/*": "./components/*",
     "./package.json": "./package.json"
   },
   "files": [
     "cipher.mjs",
     "markup.mjs",
     "wikiwords.mjs",
+    "componentry.mjs",
+    "IdForge.mjs",
+    "Toast.mjs",
+    "Popup.mjs",
+    "component-acl.mjs",
+    "pool.mjs",
+    "components/",
     "README.md"
   ],
   "repository": {

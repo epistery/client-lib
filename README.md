@@ -9,6 +9,25 @@ need by URL, plus one util the wiki plugin also uses server-side. Extracted from
 | `cipher.mjs` | browser only | per-session content + wrap crypto — the **browser twin** of `@epistery/sessions` `bot-identity` |
 | `markup.mjs` | browser only | `MarkUp` — wiki markdown renderer (marked + Mermaid from CDN), WikiWord auto-linking |
 | `wikiwords.mjs` | **browser + Node** | pure WikiWord/reference extraction — served to the browser *and* imported by the wiki plugin's server code |
+| `componentry.mjs` | browser | the atomic-component base class (cloned+trimmed from @metric-im/componentry) — event hub, own-css injection, notification init |
+| `IdForge.mjs` | browser + Node | random / dated id generation |
+| `Toast.mjs` | browser | the one canonical toast/prompt (`window.toast`) |
+| `Popup.mjs` | browser | the one canonical modal (`window.popup`) |
+| `component-acl.mjs` | **Node** | server-side `//ACL` delivery preprocessor + `levelOf(episteryClient)` |
+
+## componentry — the shared framework
+
+The value is **atomicity**: a concept (a save button, a modal, a toast) has ONE
+canonical implementation, so it is never quietly rebuilt a dozen subtly-different
+ways. Components extend `componentry.mjs` and OWN their css via `static css`
+(authored scoped to the component's class; the base injects it once). No live css
+scope/concat serve — a component is self-contained.
+
+The `//ACL` **delivery preprocessor** (`component-acl.mjs`) is the one server
+piece: the shell strips `/*ACL>N*/…/*ENDACL*/` blocks the caller's level doesn't
+meet before delivering a component's `.mjs`, so privileged logic never reaches a
+lower-privilege browser. Level derives from `req.episteryClient` (initial map:
+0 anonymous, 1 authenticated).
 
 ## How it's consumed
 
