@@ -143,6 +143,32 @@ export class Member {
   _snapshotPublic() { const out = []; const walk = (n) => { if (!n) return; out.push({ id: n.id, blank: n.blank, pub: n.pub }); walk(n.l); walk(n.r); }; walk(this.root); return out; }
   _loadPublic(snap) { for (const s of snap) { const n = this._node(s.id); if (n) { n.blank = s.blank; n.pub = s.pub; } } }
 
+  // Serialize this member's FULL state — including the private path secrets and
+  // init secret — for local persistence (the committer cannot re-derive its own
+  // contributed secrets from the log) and for commit rollback on a DS conflict.
+  // The caller guards confidentiality at rest (rivet-encrypted client store).
+  exportState() {
+    return {
+      leafIndex: this.leafIndex,
+      epoch: this.epoch,
+      groupKey: this.groupKey,
+      initSecret: toHex(this.initSecret),
+      secrets: [...this.secrets.entries()],   // [nodeId, privHex]
+      pubs: this._snapshotPublic(),           // blinded public tree
+    };
+  }
+  // Restore from exportState(). rivetPriv is supplied separately — the leaf key
+  // is never serialized (it belongs to the rivet, re-supplied on load).
+  importState(state, rivetPriv) {
+    this.leafIndex = state.leafIndex;
+    this.rivetPriv = rivetPriv;
+    this.epoch = state.epoch;
+    this.groupKey = state.groupKey;
+    this.initSecret = fromHex(state.initSecret);
+    this.secrets = new Map(state.secrets);
+    this._loadPublic(state.pubs);
+  }
+
   // A joiner adopts the pre-commit public tree + the sealed current init secret,
   // then applies the Add commit like any other member -> lands in the live epoch.
   async applyWelcome(welcome, leafIndex, rivetPriv) {
