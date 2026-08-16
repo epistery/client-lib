@@ -17,7 +17,7 @@
 // The wire/label encoding is ours ("borrow the math, not the format").
 
 import {
-  deriveSecret, dhkemEncapDeterministic, dhkemDecap, nodeKeyPair,
+  deriveSecret, dhkemEncapDeterministic, dhkemDecap, dhkemDecapFromDH, nodeKeyPair,
   privFromSecret, nextEpoch, toHex, fromHex,
 } from './treekem-kdf.mjs';
 // Randomness comes from the crypto stack (stack.random) so the SAME tree code
@@ -78,9 +78,28 @@ export class Member {
     this.initSecret = GENESIS_INIT;
     this.epoch = 0;
     this.groupKey = null;
+    // For a NON-EXTRACTABLE leaf key (the browser rivet), the wallet computes the
+    // raw ECDH shared secret; set via setLeafDecap. Server participants (derived,
+    // extractable keys) leave this null and use rivetPriv directly.
+    this.leafDecap = null;      // (ephemeralEncHex) => Promise<Uint8Array sharedSecret>
   }
+  setLeafDecap(fn) { this.leafDecap = fn; return this; }
   _leaf() { return this.leaves[this.leafIndex]; }
   _privFor(node) { return node.isLeaf && node.leafIndex === this.leafIndex ? this.rivetPriv : this.secrets.get(node.id); }
+
+  // Decap a box sealed to MY leaf pub via the non-extractable wallet: the wallet
+  // gives the raw ECDH shared secret (leafDecap), we finish HPKE decap + AEAD.
+  async _openLeaf(box) {
+    const dh = await this.leafDecap(box.enc);
+    const shared = await dhkemDecapFromDH(this.stack, dh, box.enc);
+    return this.stack.aeadDecrypt(shared, fromHex(box.iv), fromHex(box.ct));
+  }
+  // Open a sealed box at a resolution node: own non-extractable leaf → the wallet
+  // seam; otherwise the raw priv.
+  async _open(res, box) {
+    if (res.isLeaf && res.leafIndex === this.leafIndex && this.leafDecap) return this._openLeaf(box);
+    return openFrom(this.stack, this._privFor(res), box);
+  }
 
   // Seat this member at leafIndex with a rivet key (its own device on create,
   // or a joiner adopting the shared public tree).
@@ -175,7 +194,9 @@ export class Member {
     this.leafIndex = leafIndex;
     this.rivetPriv = rivetPriv;
     this._loadPublic(welcome.treeSnapshot);
-    this.initSecret = await openFrom(this.stack, rivetPriv, welcome.initBox);
+    // Welcome's initBox is sealed to MY leaf pub — a non-extractable rivet opens
+    // it through the wallet seam, an extractable participant with the raw priv.
+    this.initSecret = this.leafDecap ? await this._openLeaf(welcome.initBox) : await openFrom(this.stack, rivetPriv, welcome.initBox);
     this.epoch = welcome.epoch;
   }
 
@@ -214,15 +235,20 @@ export class Member {
     // Adopt the committer's new public path keys.
     for (const e of commit.path) { const node = this._node(e.dNodeId); if (node) { node.pub = e.newPub; node.blank = false; } }
 
-    // Find the resolution node under cCop[j] that I hold a key for, and open it.
+    // Find the resolution node under cCop[j] that I can open, and open it. A node
+    // is openable if I hold its priv (intermediates I derived, or an extractable
+    // leaf key) OR it is my own leaf and I have a leafDecap (the browser rivet's
+    // non-extractable key, delegated to the wallet).
     const resNodes = resolution(cCop[j]);
-    let box = null, myPriv = null;
+    let box = null, chosen = null;
     for (const res of resNodes) {
-      const priv = this._privFor(res);
-      if (priv) { const hit = commit.path[j].encs.find((x) => x.toNodeId === res.id); if (hit) { box = hit.box; myPriv = priv; break; } }
+      const hit = commit.path[j].encs.find((x) => x.toNodeId === res.id);
+      if (!hit) continue;
+      const openable = this._privFor(res) || (res.isLeaf && res.leafIndex === this.leafIndex && this.leafDecap);
+      if (openable) { box = hit.box; chosen = res; break; }
     }
     if (!box) { this._diverge(); return; }
-    let ps = await openFrom(this.stack, myPriv, box);
+    let ps = await this._open(chosen, box);
 
     // Derive up from the LCA to the root, recording node privs on my path.
     for (let m = j; m < cPath.length; m++) {

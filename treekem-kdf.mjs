@@ -121,8 +121,15 @@ export async function dhkemEncap(stack, recipientPubHex) {
   return dhkemEncapDeterministic(stack, recipientPubHex, privFromSecret(stack.random(32)));
 }
 export async function dhkemDecap(stack, recipientPrivHex, encHex) {
-  const dh = ecdh(recipientPrivHex, encHex);
-  const prk = await hkdfExtract(stack, utf8('eae_prk'), dh);
+  return dhkemDecapFromDH(stack, ecdh(recipientPrivHex, encHex), encHex);
+}
+// Decap from an already-computed ECDH shared secret. This is the seam for a
+// NON-EXTRACTABLE leaf key (the browser rivet): the wallet computes the raw
+// shared secret (ECDH(rivetPriv, ephemeralEnc)) internally and hands us `dhBytes`
+// — we never see the private key. Intermediate nodes (derived, extractable) and
+// server participants keep using dhkemDecap with a raw priv.
+export async function dhkemDecapFromDH(stack, dhBytes, encHex) {
+  const prk = await hkdfExtract(stack, utf8('eae_prk'), dhBytes);
   return expandWithLabel(stack, prk, 'shared_secret', utf8(encHex), 32);
 }
 

@@ -84,7 +84,10 @@ export class DsGroup {
     return r.json();   // { ok, epoch, hash }
   }
 
-  _persist() { if (this.store?.save) this.store.save({ member: this.member.exportState(), leafDir: this.leafDir }); }
+  // Awaited: the store may self-encrypt (async), and a committer's own path
+  // secret cannot be re-derived from the log — losing the last save would strand
+  // the founder on reload. Every mutating path awaits this.
+  async _persist() { if (this.store?.save) await this.store.save({ member: this.member.exportState(), leafDir: this.leafDir }); }
   _applyDir(dir) { if (!dir) return; if (dir.set) Object.assign(this.leafDir, dir.set); if (dir.del) for (const a of dir.del) delete this.leafDir[String(a).toLowerCase()]; }
 
   // ---- create a brand-new group (founder at leaf 0, epoch 1) -----------------
@@ -95,7 +98,7 @@ export class DsGroup {
     this.leafDir = { [this.address]: 0 };
     const res = await this._post({ commit, dir: { set: { [this.address]: 0 } } }, 0);
     if (res.conflict) throw new Error('a group already exists at this session');
-    this._persist();
+    await this._persist();
     return this.groupKey();
   }
 
@@ -119,7 +122,7 @@ export class DsGroup {
       this.member.importState(saved.member, this.rivetPriv);
       this.leafDir = saved.leafDir || {};
       await this._catchUp();
-      this._persist();
+      await this._persist();
       return this.groupKey();
     }
     return this._bootstrapFromWelcome();
@@ -145,7 +148,7 @@ export class DsGroup {
     for (const x of envs) {
       if (x.epoch > addEntry.epoch && x.env) { this._applyDir(x.env.dir); await this.member.apply(x.env.commit); }
     }
-    this._persist();
+    await this._persist();
     return this.groupKey();
   }
 
@@ -160,7 +163,7 @@ export class DsGroup {
       const res = await this._post({ commit, dir: dir || {} }, base);
       if (!res.conflict) {
         this._applyDir(dir);
-        this._persist();
+        await this._persist();
         return { epoch: res.epoch, groupKey: this.groupKey() };
       }
       // lost the epoch race — roll back the speculative commit, catch up, retry
