@@ -112,8 +112,12 @@ export class Member {
 
   async _epochAdvance(rootSecret) {
     const { groupKey, nextInit } = await nextEpoch(this.stack, this.initSecret, rootSecret);
+    // K is handed out as a canonical 0x-hex string — that is cipher.mjs's key
+    // contract (importAesKey → ethers.arrayify, which rejects bare hex). Every
+    // consumer (SessionView ctx.keys.K, the server/MCP group, exportState) reads
+    // it through `this.groupKey`, so 0x-prefix it once here at the source.
     this.initSecret = nextInit;
-    this.groupKey = toHex(groupKey);
+    this.groupKey = '0x' + toHex(groupKey);
     this.epoch += 1;
   }
 
@@ -182,7 +186,9 @@ export class Member {
     this.leafIndex = state.leafIndex;
     this.rivetPriv = rivetPriv;
     this.epoch = state.epoch;
-    this.groupKey = state.groupKey;
+    // Canonical 0x-hex K (cipher.mjs contract), upgrading any state persisted
+    // before the source was normalized.
+    this.groupKey = state.groupKey && !state.groupKey.startsWith('0x') ? '0x' + state.groupKey : state.groupKey;
     this.initSecret = fromHex(state.initSecret);
     this.secrets = new Map(state.secrets);
     this._loadPublic(state.pubs);
