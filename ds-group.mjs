@@ -49,8 +49,20 @@ export class DsGroup {
     this.store = opts.store || null;
     this.fetch = opts.fetchImpl || globalThis.fetch.bind(globalThis);
     this.capacity = opts.capacity || DEFAULT_CAPACITY;
+    // leafDecap: for a NON-EXTRACTABLE leaf (the browser rivet), the wallet's
+    // computeSharedSecret — (ephemeralEncHex) => Promise<Uint8Array shared>.
+    // Null for server participants (extractable derived keys use rivetPriv).
+    this.leafDecap = opts.leafDecap || null;
     this.member = null;
     this.leafDir = {};   // addressLower -> leafIndex (public directory)
+  }
+
+  // Every Member this group creates inherits the leaf-decap seam so a
+  // non-extractable rivet leaf can open commits sealed to it.
+  _newMember() {
+    const m = new Member('self', this.capacity, this.stack);
+    if (this.leafDecap) m.setLeafDecap(this.leafDecap);
+    return m;
   }
 
   _u(p) { return `${this.relayUrl}/ds/${this.contract}/${this.session}${p}`; }
@@ -92,7 +104,7 @@ export class DsGroup {
 
   // ---- create a brand-new group (founder at leaf 0, epoch 1) -----------------
   async create() {
-    this.member = new Member('self', this.capacity, this.stack);
+    this.member = this._newMember();
     this.member.seat(0, this.rivetPriv, this.rivetPub);
     const commit = await this.member.commit({ type: 'update' });   // establishes epoch 1
     this.leafDir = { [this.address]: 0 };
@@ -118,7 +130,7 @@ export class DsGroup {
   async load() {
     const saved = this.store?.load ? await this.store.load() : null;
     if (saved?.member) {
-      this.member = new Member('self', this.capacity, this.stack);
+      this.member = this._newMember();
       this.member.importState(saved.member, this.rivetPriv);
       this.leafDir = saved.leafDir || {};
       await this._catchUp();
@@ -142,7 +154,7 @@ export class DsGroup {
     if (myLeaf === 0) throw new Error('founder tree state is held by the creating device (no Welcome for leaf 0)');
     const addEntry = envs.find(x => x.env?.commit?.type === 'add' && x.env.commit.addLeafIndex === myLeaf);
     if (!addEntry) throw new Error('no Welcome for this rivet — ask a present key-holder to re-add this device');
-    this.member = new Member('self', this.capacity, this.stack);
+    this.member = this._newMember();
     await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv);
     await this.member.apply(addEntry.env.commit);
     for (const x of envs) {
