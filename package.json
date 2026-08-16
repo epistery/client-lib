@@ -1,0 +1,25 @@
+{
+  "name": "@epistery/client-lib",
+  "version": "1.0.0",
+  "description": "Shared browser modules for epistery plugin UIs — cipher (the browser twin of @epistery/sessions bot-identity), the MarkUp wiki renderer, and pure WikiWord extraction. The shell serves these at /lib/*; plugin client bundles import them by that URL.",
+  "type": "module",
+  "main": "wikiwords.mjs",
+  "exports": {
+    "./cipher": "./cipher.mjs",
+    "./markup": "./markup.mjs",
+    "./wikiwords": "./wikiwords.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cipher.mjs",
+    "markup.mjs",
+    "wikiwords.mjs",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/epistery/client-lib.git"
+  },
+  "license": "MIT",
+  "author": "Rootz Corp"
+}
