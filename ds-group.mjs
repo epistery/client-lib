@@ -86,9 +86,12 @@ export class DsGroup {
   async _post(envelope, baseEpoch) {
     const body = encBytes(envelope);
     const auth = await this.sign('POST', `${this.session}/_ds/commit`, body);
+    // Opaque octet-stream, NOT application/json: the relay's global express.json
+    // would consume a json body before the DS route's raw parser, and the DS is
+    // blind — the bytes are opaque ciphertext to it regardless.
     const r = await this.fetch(this._u('/commit'), {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: auth, 'x-ds-epoch': String(baseEpoch) },
+      headers: { 'content-type': 'application/octet-stream', authorization: auth, 'x-ds-epoch': String(baseEpoch) },
       body,
     });
     if (r.status === 409) { const j = await r.json().catch(() => ({})); return { conflict: true, current: j.current }; }
