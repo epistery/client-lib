@@ -124,16 +124,29 @@ export class Member {
   // Committer path update from THIS member's leaf. Mutates this member's tree +
   // secrets, advances its epoch, and returns the commit message for others.
   async commit({ type = 'update', addLeafIndex, addPub, removeLeafIndex } = {}) {
-    // A joiner must land in the CURRENT epoch, not replay from genesis: the
-    // Welcome carries the pre-commit public tree + the current init secret sealed
-    // to the joiner's rivet key. Captured before any mutation.
-    let welcome = null;
+    // NON-ROTATING ADD. Forward secrecy is a property of the write frontier and
+    // is enforced on REMOVAL — an add needs no rotation, because the newcomer is
+    // allowed to read. So: seat the new leaf, hand the newcomer the CURRENT group
+    // key (it reads the whole past) plus the current init secret (so it rotates
+    // in lockstep with everyone on future removes), and leave every existing
+    // member's key untouched. The DS sequence still advances so the commit log
+    // stays totally ordered. The Welcome's tree snapshot is taken AFTER seating,
+    // so the joiner adopts the live tree and never replays its own add.
     if (type === 'add') {
-      welcome = { treeSnapshot: this._snapshotPublic(), initBox: await sealTo(this.stack, addPub, this.initSecret), epoch: this.epoch };
+      this._applyStructuralAdd(addLeafIndex, addPub);
+      const gkBytes = fromHex((this.groupKey || '').replace(/^0x/, ''));
+      const welcome = {
+        treeSnapshot: this._snapshotPublic(),
+        initBox: await sealTo(this.stack, addPub, this.initSecret),
+        groupBox: await sealTo(this.stack, addPub, gkBytes),
+        epoch: this.epoch + 1,
+      };
+      this.epoch += 1;   // DS sequence advances; groupKey + initSecret unchanged
+      return { type: 'add', committerLeafIndex: this.leafIndex, addLeafIndex, addPub, path: [], welcome };
     }
 
-    // Structural op first (same order the recipients apply), then rekey.
-    if (type === 'add') this._applyStructuralAdd(addLeafIndex, addPub);
+    // REMOVE / UPDATE: rotate the committer's path so a removed leaf cannot derive
+    // the next key (forward secrecy), advancing the group key for everyone.
     if (type === 'remove') this._applyStructuralRemove(removeLeafIndex);
 
     const path = directPath(this._leaf());
@@ -159,7 +172,7 @@ export class Member {
     return {
       type, committerLeafIndex: this.leafIndex,
       addLeafIndex, addPub, removeLeafIndex,
-      path: pathEntries, welcome,
+      path: pathEntries, welcome: null,
     };
   }
 
@@ -199,10 +212,14 @@ export class Member {
   async applyWelcome(welcome, leafIndex, rivetPriv) {
     this.leafIndex = leafIndex;
     this.rivetPriv = rivetPriv;
-    this._loadPublic(welcome.treeSnapshot);
-    // Welcome's initBox is sealed to MY leaf pub — a non-extractable rivet opens
-    // it through the wallet seam, an extractable participant with the raw priv.
-    this.initSecret = this.leafDecap ? await this._openLeaf(welcome.initBox) : await openFrom(this.stack, rivetPriv, welcome.initBox);
+    this._loadPublic(welcome.treeSnapshot);   // the live tree, INCLUDING my seated leaf
+    // The Welcome (non-rotating add) delivers, sealed to MY leaf pub: the current
+    // init secret (to rotate in lockstep on future removes) and the current group
+    // key (to read now — the whole past). A non-extractable rivet opens through
+    // the wallet seam; an extractable participant with the raw priv.
+    const open = (box) => this.leafDecap ? this._openLeaf(box) : openFrom(this.stack, rivetPriv, box);
+    this.initSecret = await open(welcome.initBox);
+    this.groupKey = '0x' + toHex(await open(welcome.groupBox));
     this.epoch = welcome.epoch;
   }
 
@@ -221,7 +238,13 @@ export class Member {
   // for this member, derives to the root, advances the epoch. Converges to the
   // committer's group key.
   async apply(commit) {
-    if (commit.type === 'add') this._applyStructuralAdd(commit.addLeafIndex, commit.addPub);
+    // A non-rotating add: seat the new leaf and advance the DS sequence only —
+    // the key is unchanged, so there is no path to open. (Matches commit('add').)
+    if (commit.type === 'add') {
+      this._applyStructuralAdd(commit.addLeafIndex, commit.addPub);
+      this.epoch += 1;
+      return;
+    }
     if (commit.type === 'remove') this._applyStructuralRemove(commit.removeLeafIndex);
 
     const committerLeaf = this.leaves[commit.committerLeafIndex];
