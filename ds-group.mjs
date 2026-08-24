@@ -69,6 +69,10 @@ export class DsGroup {
   _u(p) { return `${this.relayUrl}/ds/${this.contract}/${this.session}${p}`; }
   groupKey() { return this.member?.groupKey || null; }
   epoch() { return this.member?.epoch || 0; }
+  // The key that sealed a record tagged with `epoch` — the read path for content
+  // written under an earlier epoch (floor lookup over the retained keyring). A
+  // null/absent tag resolves to the current key (untagged legacy record).
+  keyForEpoch(epoch) { return this.member ? this.member.keyForEpoch(epoch) : null; }
 
   // ---- DS reads (public) -----------------------------------------------------
   async _log(since = 0) {
