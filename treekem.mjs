@@ -252,16 +252,21 @@ export class Member {
     // init secret (to rotate in lockstep on future removes) and the current group
     // key (to read now — the whole past). A non-extractable rivet opens through
     // the wallet seam; an extractable participant with the raw priv.
-    const open = (box) => this.leafDecap ? this._openLeaf(box) : openFrom(this.stack, rivetPriv, box);
-    this.initSecret = await open(welcome.initBox);
+    // `label` rides a thrown error (diagnostic breadcrumb) so a decrypt failure
+    // names WHICH sealed box could not be opened, not just "OperationError".
+    const open = async (box, label) => {
+      try { return this.leafDecap ? await this._openLeaf(box) : await openFrom(this.stack, rivetPriv, box); }
+      catch (e) { if (!e.epLabel) e.epLabel = label; throw e; }
+    };
+    this.initSecret = await open(welcome.initBox, 'Welcome.initBox');
     this.epoch = welcome.epoch;
     if (welcome.keyringBox) {
-      const entries = JSON.parse(utf8Dec(await open(welcome.keyringBox)));
+      const entries = JSON.parse(utf8Dec(await open(welcome.keyringBox, 'Welcome.keyringBox')));
       this.keyring = new Map(entries.map(([e, k]) => [Number(e), k]));
     } else {
       // Legacy single-key Welcome (pre-keyring): seed a one-entry ring at the join
       // epoch so this member reads from its join forward, exactly as before.
-      this.keyring = new Map([[Number(welcome.epoch), '0x' + toHex(await open(welcome.groupBox))]]);
+      this.keyring = new Map([[Number(welcome.epoch), '0x' + toHex(await open(welcome.groupBox, 'Welcome.groupBox'))]]);
     }
     this.groupKey = this.keyForEpoch(this.epoch);
   }
@@ -320,7 +325,11 @@ export class Member {
       if (openable) { box = hit.box; chosen = res; break; }
     }
     if (!box) { this._diverge(); return; }
-    let ps = await this._open(chosen, box);
+    // The openable check said this node is mine, but the actual decrypt can still
+    // fail (a mismatched sealed box) — label it so the failure names the path.
+    let ps;
+    try { ps = await this._open(chosen, box); }
+    catch (e) { if (!e.epLabel) e.epLabel = `apply(${commit.type}) path-secret @node${chosen?.id}`; throw e; }
 
     // Derive up from the LCA to the root, recording node privs on my path.
     for (let m = j; m < cPath.length; m++) {

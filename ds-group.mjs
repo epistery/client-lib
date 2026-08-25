@@ -130,7 +130,8 @@ export class DsGroup {
       const env = await this._payload(e.epoch);
       if (!env) continue;
       this._applyDir(env.dir);
-      await this.member.apply(env.commit);
+      try { await this.member.apply(env.commit); }
+      catch (err) { err.epLabel = `catchup@${e.epoch}(${env.commit?.type || '?'}) › ${err.epLabel || err.message}`; throw err; }
     }
   }
 
@@ -173,9 +174,14 @@ export class DsGroup {
     this.member = this._newMember();
     // applyWelcome adopts the live tree (incl. my seated leaf) and the current
     // key — the non-rotating add means there is nothing to replay for my own add.
-    await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv);
+    try { await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv); }
+    catch (err) { err.epLabel = `bootstrap Welcome@${addEntry.epoch} › ${err.epLabel || err.message}`; throw err; }
     for (const x of envs) {
-      if (x.epoch > addEntry.epoch && x.env) { this._applyDir(x.env.dir); await this.member.apply(x.env.commit); }
+      if (x.epoch > addEntry.epoch && x.env) {
+        this._applyDir(x.env.dir);
+        try { await this.member.apply(x.env.commit); }
+        catch (err) { err.epLabel = `replay@${x.epoch}(${x.env.commit?.type || '?'}) › ${err.epLabel || err.message}`; throw err; }
+      }
     }
     await this._persist();
     return this.groupKey();
