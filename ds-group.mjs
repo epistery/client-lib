@@ -169,7 +169,17 @@ export class DsGroup {
       throw e;
     }
     if (myLeaf === 0) throw new Error('founder tree state is held by the creating device (no Welcome for leaf 0)');
-    const addEntry = envs.find(x => x.env?.commit?.type === 'add' && x.env.commit.addLeafIndex === myLeaf);
+    // A leaf can be REUSED: a prior rivet seated here, removed, then THIS rivet
+    // added at the same index. Matching on leaf index alone (.find) returns the
+    // FIRST add — the prior rivet's Welcome, sealed to a DIFFERENT key — which
+    // this device cannot decrypt (its aeadDecrypt fails on Welcome.initBox). Select
+    // the add for MY leaf sealed to MY OWN pubkey, and the LATEST if I was re-seated
+    // more than once. This is MY Welcome, regardless of who held the leaf before.
+    const lc = (a) => String(a || '').toLowerCase();
+    const mine = envs.filter(x => x.env?.commit?.type === 'add'
+      && x.env.commit.addLeafIndex === myLeaf
+      && lc(x.env.commit.addPub) === lc(this.rivetPub));
+    const addEntry = mine.length ? mine[mine.length - 1] : null;
     if (!addEntry) throw new Error('no Welcome for this rivet — ask a present key-holder to re-add this device');
     this.member = this._newMember();
     // applyWelcome adopts the live tree (incl. my seated leaf) and the current
