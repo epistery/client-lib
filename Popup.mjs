@@ -72,7 +72,11 @@ export default class Popup extends Component {
    definite size, the header reads as a title bar, the content becomes a top-
    aligned scroll region, and the tab strip (if any) sits between them. */
 .Popup.panel .window {
-  width: min(640px, 94vw); max-height: 84vh;
+  /* Override the dialog window's flex:0 0 (flex-basis 0), which would otherwise
+     win over width/height and collapse the panel to min-content — the
+     "shim + empty flash". flex:none lets the explicit size apply. */
+  flex: none;
+  width: min(640px, 94vw); height: min(84vh, 620px);
   display: flex; flex-direction: column;
   border-radius: 12px; box-shadow: 0 12px 48px rgba(0,0,0,0.35); overflow: hidden;
 }
