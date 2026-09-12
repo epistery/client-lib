@@ -69,6 +69,10 @@ export class DsGroup {
   _u(p) { return `${this.relayUrl}/ds/${this.contract}/${this.session}${p}`; }
   groupKey() { return this.member?.groupKey || null; }
   epoch() { return this.member?.epoch || 0; }
+  // The key that sealed a record tagged with `epoch` — the read path for content
+  // written under an earlier epoch (floor lookup over the retained keyring). A
+  // null/absent tag resolves to the current key (untagged legacy record).
+  keyForEpoch(epoch) { return this.member ? this.member.keyForEpoch(epoch) : null; }
 
   // ---- DS reads (public) -----------------------------------------------------
   async _log(since = 0) {
@@ -126,7 +130,8 @@ export class DsGroup {
       const env = await this._payload(e.epoch);
       if (!env) continue;
       this._applyDir(env.dir);
-      await this.member.apply(env.commit);
+      try { await this.member.apply(env.commit); }
+      catch (err) { err.epLabel = `catchup@${e.epoch}(${env.commit?.type || '?'}) › ${err.epLabel || err.message}`; throw err; }
     }
   }
 
@@ -164,14 +169,29 @@ export class DsGroup {
       throw e;
     }
     if (myLeaf === 0) throw new Error('founder tree state is held by the creating device (no Welcome for leaf 0)');
-    const addEntry = envs.find(x => x.env?.commit?.type === 'add' && x.env.commit.addLeafIndex === myLeaf);
+    // A leaf can be REUSED: a prior rivet seated here, removed, then THIS rivet
+    // added at the same index. Matching on leaf index alone (.find) returns the
+    // FIRST add — the prior rivet's Welcome, sealed to a DIFFERENT key — which
+    // this device cannot decrypt (its aeadDecrypt fails on Welcome.initBox). Select
+    // the add for MY leaf sealed to MY OWN pubkey, and the LATEST if I was re-seated
+    // more than once. This is MY Welcome, regardless of who held the leaf before.
+    const lc = (a) => String(a || '').toLowerCase();
+    const mine = envs.filter(x => x.env?.commit?.type === 'add'
+      && x.env.commit.addLeafIndex === myLeaf
+      && lc(x.env.commit.addPub) === lc(this.rivetPub));
+    const addEntry = mine.length ? mine[mine.length - 1] : null;
     if (!addEntry) throw new Error('no Welcome for this rivet — ask a present key-holder to re-add this device');
     this.member = this._newMember();
     // applyWelcome adopts the live tree (incl. my seated leaf) and the current
     // key — the non-rotating add means there is nothing to replay for my own add.
-    await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv);
+    try { await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv); }
+    catch (err) { err.epLabel = `bootstrap Welcome@${addEntry.epoch} › ${err.epLabel || err.message}`; throw err; }
     for (const x of envs) {
-      if (x.epoch > addEntry.epoch && x.env) { this._applyDir(x.env.dir); await this.member.apply(x.env.commit); }
+      if (x.epoch > addEntry.epoch && x.env) {
+        this._applyDir(x.env.dir);
+        try { await this.member.apply(x.env.commit); }
+        catch (err) { err.epLabel = `replay@${x.epoch}(${x.env.commit?.type || '?'}) › ${err.epLabel || err.message}`; throw err; }
+      }
     }
     await this._persist();
     return this.groupKey();

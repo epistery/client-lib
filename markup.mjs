@@ -94,7 +94,7 @@ export default class MarkUp {
       // Configure marked - allow raw HTML to pass through
       this.marked.setOptions({
         gfm: true,
-        breaks: true,
+        breaks: false,
         sanitize: false,  // Don't sanitize HTML
         smartypants: false
       });

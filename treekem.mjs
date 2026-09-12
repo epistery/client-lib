@@ -24,6 +24,8 @@ import {
 // runs in the browser (crypto.getRandomValues) and Node — no node:crypto import.
 
 const GENESIS_INIT = new Uint8Array(32); // shared group genesis; real groups seed from the group id
+const utf8Enc = (s) => new TextEncoder().encode(s);
+const utf8Dec = (u8) => new TextDecoder().decode(u8);
 
 // ---- tree topology (identical across every member's copy) -------------------
 let _idc = 0;
@@ -77,7 +79,12 @@ export class Member {
     this.secrets = new Map();   // nodeId -> privHex for intermediate nodes this member knows
     this.initSecret = GENESIS_INIT;
     this.epoch = 0;
-    this.groupKey = null;
+    this.groupKey = null;           // current epoch's key — the write frontier
+    // The epoch keyring: effectiveEpoch -> groupKey hex, RETAINED so a member can
+    // still read content sealed under an earlier epoch after a rotation. Only a
+    // rotation adds an entry (a non-rotating add reuses the current key); reads
+    // resolve a record's epoch tag by floor lookup (keyForEpoch).
+    this.keyring = new Map();
     // For a NON-EXTRACTABLE leaf key (the browser rivet), the wallet computes the
     // raw ECDH shared secret; set via setLeafDecap. Server participants (derived,
     // extractable keys) leave this null and use rivetPriv directly.
@@ -119,6 +126,23 @@ export class Member {
     this.initSecret = nextInit;
     this.groupKey = '0x' + toHex(groupKey);
     this.epoch += 1;
+    // Retain the new key at the epoch it becomes effective. THIS is the fix: the
+    // prior keys stay in the ring instead of being overwritten, so a rotation no
+    // longer orphans content that continuing members are still entitled to read.
+    this.keyring.set(this.epoch, this.groupKey);
+  }
+
+  // The key that sealed a record tagged with `epoch`: the retained key from the
+  // most recent rotation at or before it. A non-rotating add advances the epoch
+  // WITHOUT changing the key, so a record's epoch can land between rotations —
+  // floor to the rotation in force when it was written. A null/absent tag is an
+  // untagged legacy record → the current key (the migration rule: anything
+  // readable today was written under the current key).
+  keyForEpoch(epoch) {
+    if (epoch == null) return this.groupKey;
+    let bestEpoch = -1, key = null;
+    for (const [e, k] of this.keyring) if (e <= epoch && e > bestEpoch) { bestEpoch = e; key = k; }
+    return key;
   }
 
   // Committer path update from THIS member's leaf. Mutates this member's tree +
@@ -134,14 +158,18 @@ export class Member {
     // so the joiner adopts the live tree and never replays its own add.
     if (type === 'add') {
       this._applyStructuralAdd(addLeafIndex, addPub);
-      const gkBytes = fromHex((this.groupKey || '').replace(/^0x/, ''));
+      // Seal the WHOLE keyring to the joiner, not just the current key. A
+      // non-rotating add lets the newcomer read the whole past (EpisteryData
+      // architecture) — which now means every retained epoch key, so it can open
+      // records sealed before it joined, exactly as a member who was always here.
+      const ringBox = await sealTo(this.stack, addPub, utf8Enc(JSON.stringify([...this.keyring])));
       const welcome = {
         treeSnapshot: this._snapshotPublic(),
         initBox: await sealTo(this.stack, addPub, this.initSecret),
-        groupBox: await sealTo(this.stack, addPub, gkBytes),
+        keyringBox: ringBox,
         epoch: this.epoch + 1,
       };
-      this.epoch += 1;   // DS sequence advances; groupKey + initSecret unchanged
+      this.epoch += 1;   // DS sequence advances; groupKey + keyring + initSecret unchanged
       return { type: 'add', committerLeafIndex: this.leafIndex, addLeafIndex, addPub, path: [], welcome };
     }
 
@@ -188,6 +216,7 @@ export class Member {
       leafIndex: this.leafIndex,
       epoch: this.epoch,
       groupKey: this.groupKey,
+      keyring: [...this.keyring],             // [effectiveEpoch, groupKeyHex][]
       initSecret: toHex(this.initSecret),
       secrets: [...this.secrets.entries()],   // [nodeId, privHex]
       pubs: this._snapshotPublic(),           // blinded public tree
@@ -205,6 +234,12 @@ export class Member {
     this.initSecret = fromHex(state.initSecret);
     this.secrets = new Map(state.secrets);
     this._loadPublic(state.pubs);
+    // Restore the keyring — REPLACE, never merge: a commit rollback relies on
+    // importState dropping the speculative epoch's entry. Legacy state persisted
+    // before the keyring seeds a one-entry ring at its current epoch.
+    if (Array.isArray(state.keyring)) this.keyring = new Map(state.keyring.map(([e, k]) => [Number(e), k]));
+    else if (this.groupKey) this.keyring = new Map([[Number(state.epoch), this.groupKey]]);
+    else this.keyring = new Map();
   }
 
   // A joiner adopts the pre-commit public tree + the sealed current init secret,
@@ -217,10 +252,23 @@ export class Member {
     // init secret (to rotate in lockstep on future removes) and the current group
     // key (to read now — the whole past). A non-extractable rivet opens through
     // the wallet seam; an extractable participant with the raw priv.
-    const open = (box) => this.leafDecap ? this._openLeaf(box) : openFrom(this.stack, rivetPriv, box);
-    this.initSecret = await open(welcome.initBox);
-    this.groupKey = '0x' + toHex(await open(welcome.groupBox));
+    // `label` rides a thrown error (diagnostic breadcrumb) so a decrypt failure
+    // names WHICH sealed box could not be opened, not just "OperationError".
+    const open = async (box, label) => {
+      try { return this.leafDecap ? await this._openLeaf(box) : await openFrom(this.stack, rivetPriv, box); }
+      catch (e) { if (!e.epLabel) e.epLabel = label; throw e; }
+    };
+    this.initSecret = await open(welcome.initBox, 'Welcome.initBox');
     this.epoch = welcome.epoch;
+    if (welcome.keyringBox) {
+      const entries = JSON.parse(utf8Dec(await open(welcome.keyringBox, 'Welcome.keyringBox')));
+      this.keyring = new Map(entries.map(([e, k]) => [Number(e), k]));
+    } else {
+      // Legacy single-key Welcome (pre-keyring): seed a one-entry ring at the join
+      // epoch so this member reads from its join forward, exactly as before.
+      this.keyring = new Map([[Number(welcome.epoch), '0x' + toHex(await open(welcome.groupBox, 'Welcome.groupBox'))]]);
+    }
+    this.groupKey = this.keyForEpoch(this.epoch);
   }
 
   _applyStructuralAdd(leafIndex, pub) {
@@ -277,7 +325,11 @@ export class Member {
       if (openable) { box = hit.box; chosen = res; break; }
     }
     if (!box) { this._diverge(); return; }
-    let ps = await this._open(chosen, box);
+    // The openable check said this node is mine, but the actual decrypt can still
+    // fail (a mismatched sealed box) — label it so the failure names the path.
+    let ps;
+    try { ps = await this._open(chosen, box); }
+    catch (e) { if (!e.epLabel) e.epLabel = `apply(${commit.type}) path-secret @node${chosen?.id}`; throw e; }
 
     // Derive up from the LCA to the root, recording node privs on my path.
     for (let m = j; m < cPath.length; m++) {
