@@ -24,15 +24,17 @@ class WikiWord {
 
     for (let line of lines) {
       // Check for code fence start/end: ``` or ~~~, 3 or more chars
-      const fenceMatch = line.match(/^([`~]){3,}/);
+      // A fence can be indented — inside a list item it always is. Group 1 is
+      // the run itself, group 2 its character, so the indent is not counted.
+      const fenceMatch = line.match(/^[ \t]*(([`~])\2{2,})/);
 
       if (fenceMatch) {
         if (!skipping) {
           // Starting a code block
           skipping = true;
-          fenceChar = fenceMatch[1];
-          fenceLength = fenceMatch[0].length;
-        } else if (fenceMatch[1] === fenceChar && fenceMatch[0].length >= fenceLength) {
+          fenceChar = fenceMatch[2];
+          fenceLength = fenceMatch[1].length;
+        } else if (fenceMatch[2] === fenceChar && fenceMatch[1].length >= fenceLength) {
           // Ending a code block - must match the opening fence char and be at least as long
           skipping = false;
           fenceChar = null;

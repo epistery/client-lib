@@ -36,11 +36,11 @@ export function extractWikiWords(body) {
 
   for (const line of body.split('\n')) {
     // Track ``` / ~~~ code fences; never link inside them.
-    const fence = line.match(/^([`~]){3,}/);
+    const fence = line.match(/^[ \t]*(([`~])\2{2,})/);
     if (fence) {
       if (!skipping) {
-        skipping = true; fenceChar = fence[1]; fenceLength = fence[0].length;
-      } else if (fence[1] === fenceChar && fence[0].length >= fenceLength) {
+        skipping = true; fenceChar = fence[2]; fenceLength = fence[1].length;
+      } else if (fence[2] === fenceChar && fence[1].length >= fenceLength) {
         skipping = false; fenceChar = null; fenceLength = 0;
       }
       continue;
