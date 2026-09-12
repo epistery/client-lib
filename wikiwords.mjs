@@ -9,6 +9,13 @@
 // reference graph the wiki tree is built from, so the regexes here MUST stay
 // in lockstep with WikiWord.process() in markup.mjs (they are copied from it).
 
+// Inline `code` is literal text: a WikiWord inside backticks names a symbol,
+// it is not a link. Splitting on the code spans interleaves the runs, so the
+// plain text lands on even indices and the code spans on odd.
+export function splitInlineCode(line) {
+  return line.split(/(`+[^`]*`+)/g);
+}
+
 const DOC_ID_RE = /^[A-Za-z0-9_]{3,}$/;
 // [Word] forced link — not an image (!), not an existing [text](url).
 const BRACKET_RE = /(?<!!)\[([A-Za-z0-9_]+)\](?!\()/g;
@@ -40,17 +47,22 @@ export function extractWikiWords(body) {
     }
     if (skipping) continue;
 
-    let m;
-    BRACKET_RE.lastIndex = 0;
-    while ((m = BRACKET_RE.exec(line)) !== null) {
-      if (DOC_ID_RE.test(m[1])) ids.add(m[1]);
-    }
-    CAMEL_RE.lastIndex = 0;
-    while ((m = CAMEL_RE.exec(line)) !== null) {
-      const pre = m[1], word = m[2];
-      if (word.charAt(0) === '!') continue;        // !Escaped — not a link
-      if (pre === 'W:' || pre === 'G:') continue;   // external search links
-      if (DOC_ID_RE.test(word)) ids.add(word);
+    // Only the plain runs between inline `code` spans hold references.
+    const runs = splitInlineCode(line);
+    for (let r = 0; r < runs.length; r += 2) {
+      const text = runs[r];
+      let m;
+      BRACKET_RE.lastIndex = 0;
+      while ((m = BRACKET_RE.exec(text)) !== null) {
+        if (DOC_ID_RE.test(m[1])) ids.add(m[1]);
+      }
+      CAMEL_RE.lastIndex = 0;
+      while ((m = CAMEL_RE.exec(text)) !== null) {
+        const pre = m[1], word = m[2];
+        if (word.charAt(0) === '!') continue;        // !Escaped — not a link
+        if (pre === 'W:' || pre === 'G:') continue;   // external search links
+        if (DOC_ID_RE.test(word)) ids.add(word);
+      }
     }
   }
   return Array.from(ids);

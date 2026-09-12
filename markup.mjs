@@ -7,7 +7,7 @@
  * sibling served file in the browser and to the package file in Node.
  */
 
-import { extractWikiWords } from './wikiwords.mjs';
+import { extractWikiWords, splitInlineCode } from './wikiwords.mjs';
 
 // WikiWord processor - converts CamelCase words to wiki links
 class WikiWord {
@@ -44,34 +44,28 @@ class WikiWord {
       }
 
       if (!skipping) {
-        // To force a link not in camel case surround the word in brackets
-        // Skip image syntax (![...]) and existing markdown links ([...](...))
-        line = line.replace(/(?<!!)\[([A-Za-z0-9_]+)\](?!\()/g, (match, word) => {
-          return `[${word}](${this.basePath}/${word})`;
-        });
-        // Match CamelCase WikiWords, but avoid matching words already in markdown links
-        // The negative lookbehind (?<![[(]) prevents matching inside [text] or already-created [text](url)
-        line = line.replace(/(^|[^a-zA-Z0-9:_\-=.["'}{\\/[])([!A-Z][A-Z0-9]*[a-z][a-z0-9_]*[A-Z][A-Za-z0-9_]*)(?![^\[]*\])/g, (match, pre, word) => {
-          if (word.charAt(0) === '!') return pre + (word.slice(1));
-          else if (pre === "W:") return `[${word}](wikipedia.org?s=${word})`;
-          else if (pre === "G:") return `[${word}](google.com?s=${word})`;
-          else return `${pre}[${word}](${this.basePath}/${word})`;
-        });
+        // Inline `code` spans stay literal — see splitInlineCode.
+        line = splitInlineCode(line).map((seg, i) => {
+          if (i % 2) return seg;
+          // To force a link not in camel case surround the word in brackets
+          // Skip image syntax (![...]) and existing markdown links ([...](...))
+          seg = seg.replace(/(?<!!)\[([A-Za-z0-9_]+)\](?!\()/g, (match, word) => {
+            return `[${word}](${this.basePath}/${word})`;
+          });
+          // Match CamelCase WikiWords, but avoid matching words already in markdown links
+          // The negative lookbehind (?<![[(]) prevents matching inside [text] or already-created [text](url)
+          seg = seg.replace(/(^|[^a-zA-Z0-9:_\-=.["'}{\\/[])([!A-Z][A-Z0-9]*[a-z][a-z0-9_]*[A-Z][A-Za-z0-9_]*)(?![^\[]*\])/g, (match, pre, word) => {
+            if (word.charAt(0) === '!') return pre + (word.slice(1));
+            else if (pre === "W:") return `[${word}](wikipedia.org?s=${word})`;
+            else if (pre === "G:") return `[${word}](google.com?s=${word})`;
+            else return `${pre}[${word}](${this.basePath}/${word})`;
+          });
+          return seg;
+        }).join('');
       }
       newLines.push(line);
     }
     return newLines.join('\n');
-  }
-
-  isInCodeBlock(text, position) {
-    // Simple check - count backticks before position
-    const before = text.substring(0, position);
-    const singleTicks = (before.match(/`/g) || []).length;
-    const tripleTicks = (before.match(/```/g) || []).length;
-
-    // If odd number of single ticks (not triple), we're in inline code
-    // If odd number of triple ticks, we're in a code block
-    return (singleTicks - tripleTicks * 3) % 2 === 1 || tripleTicks % 2 === 1;
   }
 }
 
