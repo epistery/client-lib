@@ -100,7 +100,35 @@ export default class Component {
     let args = Array.from(arguments).splice(2);
     let hubComponent = this.getHub();
     hubComponent.watchers[event] = hubComponent.watchers[event] || [];
-    hubComponent.watchers[event].push(action.bind(hubComponent, ...args));
+    // Keep the ORIGINAL alongside the bound copy. bind() returns a new function,
+    // so without this the caller can never name what it registered and off() is
+    // impossible — which is why watchers here could only ever accumulate. The
+    // owner is recorded too, so a component can drop everything it registered in
+    // one call when it is torn down.
+    const bound = action.bind(hubComponent, ...args);
+    bound._source = action;
+    bound._owner = this;
+    hubComponent.watchers[event].push(bound);
+  }
+
+  /**
+   * Stop listening. `off(event, action)` removes that registration, `off(event)`
+   * removes every watcher for the event, and `off()` removes everything this
+   * component registered — the teardown case, so a view that comes and goes does
+   * not leave a listener behind on each visit.
+   */
+  off(event, action) {
+    let hubComponent = this.getHub();
+    if (!hubComponent?.watchers) return;
+    if (!event) {
+      for (const name of Object.keys(hubComponent.watchers)) {
+        hubComponent.watchers[name] = hubComponent.watchers[name].filter((w) => w._owner !== this);
+      }
+      return;
+    }
+    const list = hubComponent.watchers[event];
+    if (!list) return;
+    hubComponent.watchers[event] = action ? list.filter((w) => w._source !== action) : [];
   }
 
   /**
