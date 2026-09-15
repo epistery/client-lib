@@ -24,7 +24,10 @@
 import { Member } from './treekem.mjs';
 import { cryptoStack } from './treekem-kdf.mjs';
 
-const DEFAULT_CAPACITY = 8;   // v1 fixed capacity (spike scope; tree-doubling is later work)
+// The size a NEW group's tree starts at. Not a ceiling: a full tree doubles when
+// the next member is seated (treekem growTree), so a group grows with its
+// membership — one primitive at any size, which is what the tree was adopted for.
+const DEFAULT_CAPACITY = 8;
 const encBytes = (obj) => new TextEncoder().encode(JSON.stringify(obj));
 const decBytes = (buf) => JSON.parse(new TextDecoder().decode(new Uint8Array(buf)));
 const fromB64 = (b64) => { const s = atob(b64); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
@@ -217,17 +220,25 @@ export class DsGroup {
     throw new Error('DS commit failed after retries (persistent epoch conflict)');
   }
 
-  _freeLeaf() {
+  // The leaf the next member takes: the lowest free one (a blank left by a removal
+  // is reused first), or the first leaf of the doubled tree when none is free.
+  // Read from the LIVE member, which may already have grown past the capacity this
+  // group was constructed with.
+  _nextLeaf() {
+    const capacity = this.member?.capacity || this.capacity;
     const taken = new Set(Object.values(this.leafDir));
-    for (let i = 1; i < this.capacity; i++) if (!taken.has(i)) return i;
-    return -1;
+    for (let i = 1; i < capacity; i++) if (!taken.has(i)) return i;
+    return capacity;   // beyond the current tree: the add grows it
   }
 
   // Add a member (its rivet pubkey at a free leaf). Authorization (may they be a
   // member) is a separate on-chain setMember by the owner — this is key-delivery.
+  //
+  // A full group GROWS rather than refusing. Seating past the last leaf doubles
+  // the tree, which rotates the committer's path and so advances the epoch; an
+  // ordinary add still does not rotate.
   async addMember(address, pub) {
-    const leaf = this._freeLeaf();
-    if (leaf < 0) throw new Error('group at capacity');
+    const leaf = this._nextLeaf();
     return this._commitWithRebase({ type: 'add', addLeafIndex: leaf, addPub: pub }, { set: { [String(address).toLowerCase()]: leaf } });
   }
 
@@ -276,7 +287,7 @@ export class DsGroup {
   // A present key-holder drains seat requests: for each asker the chain still
   // recognizes as a member (isMember(address), the caller's on-chain roleOf
   // check), seat it (Add commit + Welcome) and consume the request. Returns the
-  // count newly seated. Best-effort per request — capacity/conflict leaves it
+  // count newly seated. Best-effort per request — an epoch conflict leaves it
   // pending for the next drain.
   async drainSeatRequests(isMember) {
     if (!this.member) throw new Error('group not loaded');
@@ -286,7 +297,7 @@ export class DsGroup {
       if (this.leafDir[q.address] != null) { done.push(q.id); continue; }   // already seated
       if (isMember && !(await isMember(q.address))) continue;               // not a member per the chain
       try { await this.addMember(q.address, q.pub); done.push(q.id); }
-      catch { /* capacity/epoch conflict — retry next drain */ }
+      catch { /* epoch conflict — retry next drain */ }
     }
     if (done.length) { try { await this._consumeSeatRequests(done); } catch { /* best-effort */ } }
     return done.length;

@@ -12,9 +12,17 @@
 // key, a removed rivet can NOT derive the next one, and a self-Update rotates a
 // member's path (post-compromise healing). Bytes never leave the client.
 //
-// Deliberate v1 scope: fixed leaf capacity (blank leaves reused on add), no
-// tree-doubling; resolution handles blanks (removed leaves); the crypto is real.
-// The wire/label encoding is ours ("borrow the math, not the format").
+// The tree GROWS. A full group doubles rather than refusing a member: the
+// existing tree becomes the left half of a taller one, so "a session is that
+// group small, a board is the same group at a thousand members" is one mechanism
+// at two sizes, not two designs. Blank leaves (removed members) are reused first;
+// growth happens only when none is free. Resolution handles blanks; the crypto is
+// real. The wire/label encoding is ours ("borrow the math, not the format").
+//
+// Node identity survives a doubling. Ids are allocated ABOVE every id in use, so
+// the nodes a historical commit named still resolve to the same nodes after the
+// tree has grown — a member replaying the log from epoch 1 converges whether or
+// not a growth happened along the way.
 
 import {
   deriveSecret, dhkemEncapDeterministic, dhkemDecap, dhkemDecapFromDH, nodeKeyPair,
@@ -28,22 +36,47 @@ const utf8Enc = (s) => new TextEncoder().encode(s);
 const utf8Dec = (u8) => new TextDecoder().decode(u8);
 
 // ---- tree topology (identical across every member's copy) -------------------
-let _idc = 0;
 class TNode {
-  constructor() { this.id = _idc++; this.parent = null; this.l = null; this.r = null; this.isLeaf = false; this.leafIndex = -1; this.blank = true; this.pub = null; }
+  constructor() { this.id = -1; this.parent = null; this.l = null; this.r = null; this.isLeaf = false; this.leafIndex = -1; this.blank = true; this.pub = null; }
 }
-export function buildTree(capacity) {
-  _idc = 0; // deterministic ids per build so member copies share them
+// Ids are assigned in creation order (a node before its children) from `startId`,
+// which is what every member's copy does independently — the numbering is a pure
+// function of (capacity, startId, leafOffset), so the copies agree without
+// exchanging it. A base tree starts at 0 and numbers exactly as it always has.
+export function buildTree(capacity, startId = 0, leafOffset = 0) {
   const leaves = [];
+  let next = startId;
   const build = (depth) => {
     const n = new TNode();
-    if (depth === 0) { n.isLeaf = true; n.leafIndex = leaves.length; leaves.push(n); }
+    n.id = next++;
+    if (depth === 0) { n.isLeaf = true; n.leafIndex = leafOffset + leaves.length; leaves.push(n); }
     else { n.l = build(depth - 1); n.r = build(depth - 1); n.l.parent = n; n.r.parent = n; }
     return n;
   };
   const root = build(Math.log2(capacity));
   return { root, leaves };
 }
+
+// Double a tree: the existing root becomes the left child of a new root whose
+// right half is blank, so existing leaves keep their indices and new members take
+// indices `capacity`..`2*capacity-1`.
+//
+// Every new id is allocated above the existing ones (a tree of capacity c uses
+// ids 0..2c-2), so nothing already committed is renumbered. The new root is blank
+// and therefore has no secret: the committer that grows the tree must rotate its
+// path in the same commit, which is what `commit({type:'add'})` does when it grows.
+export function growTree(root, leaves, capacity) {
+  const startId = 2 * capacity - 1;
+  const right = buildTree(capacity, startId, capacity);
+  const newRoot = new TNode();
+  newRoot.id = startId + (2 * capacity - 1);
+  newRoot.l = root; newRoot.r = right.root;
+  root.parent = newRoot; right.root.parent = newRoot;
+  newRoot.blank = true; newRoot.pub = null;
+  return { root: newRoot, leaves: [...leaves, ...right.leaves], capacity: capacity * 2 };
+}
+
+const nextPow2 = (n) => { let c = 1; while (c < n) c *= 2; return c; };
 const sibling = (n) => (n.parent.l === n ? n.parent.r : n.parent.l);
 function directPath(leaf) { const p = []; let n = leaf.parent; while (n) { p.push(n); n = n.parent; } return p; }
 function copath(leaf) { const c = []; let below = leaf, n = leaf.parent; while (n) { c.push(sibling(below)); below = n; n = n.parent; } return c; }
@@ -71,6 +104,7 @@ export class Member {
   constructor(name, capacity, stack) {
     this.name = name;
     this.stack = stack;
+    this.capacity = capacity;
     const t = buildTree(capacity);
     this.root = t.root;
     this.leaves = t.leaves;
@@ -91,6 +125,15 @@ export class Member {
     this.leafDecap = null;      // (ephemeralEncHex) => Promise<Uint8Array sharedSecret>
   }
   setLeafDecap(fn) { this.leafDecap = fn; return this; }
+
+  // Double this member's tree. Every member does this independently and
+  // deterministically — from a commit that grew, from a Welcome, or from restored
+  // state — so their copies stay identical without the shape being transmitted.
+  grow() {
+    const g = growTree(this.root, this.leaves, this.capacity);
+    this.root = g.root; this.leaves = g.leaves; this.capacity = g.capacity;
+  }
+  growTo(capacity) { while (this.capacity < capacity) this.grow(); }
   _leaf() { return this.leaves[this.leafIndex]; }
   _privFor(node) { return node.isLeaf && node.leafIndex === this.leafIndex ? this.rivetPriv : this.secrets.get(node.id); }
 
@@ -157,7 +200,25 @@ export class Member {
     // stays totally ordered. The Welcome's tree snapshot is taken AFTER seating,
     // so the joiner adopts the live tree and never replays its own add.
     if (type === 'add') {
+      // A full tree grows to seat the newcomer. The taller tree's root is blank,
+      // so unlike an ordinary add this one MUST rotate to establish a root secret
+      // — which advances the epoch and mints a new key for everyone.
+      const grew = addLeafIndex >= this.capacity;
+      if (grew) this.growTo(nextPow2(addLeafIndex + 1));
       this._applyStructuralAdd(addLeafIndex, addPub);
+      if (grew) {
+        const path = await this._rotatePath();
+        // Sealed AFTER the rotation, so the joiner adopts the live tree and the
+        // key the rotation just minted, exactly as it does for an ordinary add.
+        const welcome = {
+          treeSnapshot: this._snapshotPublic(),
+          initBox: await sealTo(this.stack, addPub, this.initSecret),
+          keyringBox: await sealTo(this.stack, addPub, utf8Enc(JSON.stringify([...this.keyring]))),
+          epoch: this.epoch,
+          capacity: this.capacity,
+        };
+        return { type: 'add', grow: true, capacity: this.capacity, committerLeafIndex: this.leafIndex, addLeafIndex, addPub, path, welcome };
+      }
       // Seal the WHOLE keyring to the joiner, not just the current key. A
       // non-rotating add lets the newcomer read the whole past (EpisteryData
       // architecture) — which now means every retained epoch key, so it can open
@@ -168,20 +229,35 @@ export class Member {
         initBox: await sealTo(this.stack, addPub, this.initSecret),
         keyringBox: ringBox,
         epoch: this.epoch + 1,
+        // The SHAPE, always. A member seated into a tree that has already grown
+        // must build the taller tree before it adopts the snapshot, or it maps
+        // those node ids onto a tree that never had them.
+        capacity: this.capacity,
       };
       this.epoch += 1;   // DS sequence advances; groupKey + keyring + initSecret unchanged
-      return { type: 'add', committerLeafIndex: this.leafIndex, addLeafIndex, addPub, path: [], welcome };
+      return { type: 'add', capacity: this.capacity, committerLeafIndex: this.leafIndex, addLeafIndex, addPub, path: [], welcome };
     }
 
     // REMOVE / UPDATE: rotate the committer's path so a removed leaf cannot derive
     // the next key (forward secrecy), advancing the group key for everyone.
     if (type === 'remove') this._applyStructuralRemove(removeLeafIndex);
 
+    const pathEntries = await this._rotatePath();
+
+    return {
+      type, capacity: this.capacity, committerLeafIndex: this.leafIndex,
+      addLeafIndex, addPub, removeLeafIndex,
+      path: pathEntries, welcome: null,
+    };
+  }
+
+  // Rotate this member's path: fresh secrets from its leaf to the root, each
+  // sealed to the copath resolution, advancing the epoch to the key they derive.
+  // Shared by remove, update, and the add that grew the tree.
+  async _rotatePath() {
     const path = directPath(this._leaf());
     const cop = copath(this._leaf());
-    const leafPS = new Uint8Array(this.stack.random(32));
-
-    let ps = leafPS;
+    let ps = new Uint8Array(this.stack.random(32));
     const pathEntries = [];
     for (let m = 0; m < path.length; m++) {
       ps = await deriveSecret(this.stack, ps, 'path');
@@ -194,14 +270,8 @@ export class Member {
       for (const res of resolution(cop[m])) encs.push({ toNodeId: res.id, box: await sealTo(this.stack, res.pub, ps) });
       pathEntries.push({ dNodeId: node.id, newPub: node.pub, encs });
     }
-    const rootSecret = ps;
-    await this._epochAdvance(rootSecret);
-
-    return {
-      type, committerLeafIndex: this.leafIndex,
-      addLeafIndex, addPub, removeLeafIndex,
-      path: pathEntries, welcome: null,
-    };
+    await this._epochAdvance(ps);
+    return pathEntries;
   }
 
   _snapshotPublic() { const out = []; const walk = (n) => { if (!n) return; out.push({ id: n.id, blank: n.blank, pub: n.pub }); walk(n.l); walk(n.r); }; walk(this.root); return out; }
@@ -213,6 +283,7 @@ export class Member {
   // The caller guards confidentiality at rest (rivet-encrypted client store).
   exportState() {
     return {
+      capacity: this.capacity,
       leafIndex: this.leafIndex,
       epoch: this.epoch,
       groupKey: this.groupKey,
@@ -225,6 +296,9 @@ export class Member {
   // Restore from exportState(). rivetPriv is supplied separately — the leaf key
   // is never serialized (it belongs to the rivet, re-supplied on load).
   importState(state, rivetPriv) {
+    // Restore the SHAPE before the contents: a state saved after a growth carries
+    // ids that only exist in the taller tree.
+    if (state.capacity) this.growTo(state.capacity);
     this.leafIndex = state.leafIndex;
     this.rivetPriv = rivetPriv;
     this.epoch = state.epoch;
@@ -245,6 +319,8 @@ export class Member {
   // A joiner adopts the pre-commit public tree + the sealed current init secret,
   // then applies the Add commit like any other member -> lands in the live epoch.
   async applyWelcome(welcome, leafIndex, rivetPriv) {
+    // The tree the Welcome snapshots may be taller than this fresh member's.
+    if (welcome.capacity) this.growTo(welcome.capacity);
     this.leafIndex = leafIndex;
     this.rivetPriv = rivetPriv;
     this._loadPublic(welcome.treeSnapshot);   // the live tree, INCLUDING my seated leaf
@@ -286,12 +362,15 @@ export class Member {
   // for this member, derives to the root, advances the epoch. Converges to the
   // committer's group key.
   async apply(commit) {
+    // The shape first, whatever the commit does: the leaf it seats, and every node
+    // id its path names, exist only in a tree at least this tall.
+    if (commit.capacity) this.growTo(commit.capacity);
     // A non-rotating add: seat the new leaf and advance the DS sequence only —
     // the key is unchanged, so there is no path to open. (Matches commit('add').)
     if (commit.type === 'add') {
       this._applyStructuralAdd(commit.addLeafIndex, commit.addPub);
-      this.epoch += 1;
-      return;
+      if (!commit.grow) { this.epoch += 1; return; }
+      // A grown add rotated the committer's path — open it like any rotation.
     }
     if (commit.type === 'remove') this._applyStructuralRemove(commit.removeLeafIndex);
 
