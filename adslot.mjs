@@ -45,19 +45,29 @@ export function adAgency(session) {
 export async function fillAdSlot(el, session, { format = 'banner' } = {}) {
   const agency = adAgency(session);
   if (!agency || !el || !FORMATS.has(format)) return false;
+  // Declare the space before asking for the ad. The class says which shape is
+  // coming and the publisher's own css gives it a band, so the fragment arrives
+  // into a box that already exists instead of pushing the page down as it loads.
+  el.classList.add('adnet-slot', `adnet-slot-${format}`);
   const q = new URLSearchParams({ session: `${session.owner}:${session.id}`, page: location.pathname });
   const cid = continuityId();
   if (cid) q.set('cid', cid);
   try {
     const r = await fetch(`${agency}/render/${format}?${q}`, { credentials: 'omit' });
-    if (!r.ok || r.status === 204) return false;
+    if (!r.ok || r.status === 204) return release(el, format);
     const html = await r.text();
-    if (!html.trim()) return false;
+    if (!html.trim()) return release(el, format);
     el.innerHTML = html;
     el.dataset.adFilled = '1';
     return true;
   } catch (e) {
     console.warn('[adslot] no ad:', e.message);
-    return false;
+    return release(el, format);
   }
+}
+
+/** Nothing to show: give the declared space back, so no empty band is left. */
+function release(el, format) {
+  el.classList.remove('adnet-slot', `adnet-slot-${format}`);
+  return false;
 }
