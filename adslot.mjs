@@ -41,6 +41,10 @@ export function adAgency(session) {
 /**
  * Fill `el` with one ad for `session`. Resolves true when an ad landed, false when
  * the session carries no ads or the network had nothing to show.
+ *
+ * `el` is a SLOT: the publisher gives it a size and a place on the page, and the
+ * network fills it with a whole ad — creative, the advertiser's own copy, and
+ * whose ad it is. Nothing here takes the unit apart.
  */
 export async function fillAdSlot(el, session, { format = 'banner' } = {}) {
   const agency = adAgency(session);
