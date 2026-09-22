@@ -24,6 +24,14 @@
 import { Member } from './treekem.mjs';
 import { cryptoStack } from './treekem-kdf.mjs';
 
+// The commit format this client writes, sent with every commit. 2 = growth-aware:
+// commits and saved state carry the tree's capacity, and an add never seats an
+// occupied leaf. The relay refuses commits below its floor — the one lever that
+// reaches a tab still running older code, which would otherwise commit from a tree
+// shape it cannot represent (the library's epoch 21, from a tab open since before
+// growth shipped).
+export const DS_FORMAT = 2;
+
 // The size a NEW group's tree starts at. Not a ceiling: a full tree doubles when
 // the next member is seated (treekem growTree), so a group grows with its
 // membership — one primitive at any size, which is what the tree was adopted for.
@@ -99,10 +107,16 @@ export class DsGroup {
     // blind — the bytes are opaque ciphertext to it regardless.
     const r = await this.fetch(this._u('/commit'), {
       method: 'POST',
-      headers: { 'content-type': 'application/octet-stream', authorization: auth, 'x-ds-epoch': String(baseEpoch) },
+      headers: { 'content-type': 'application/octet-stream', authorization: auth, 'x-ds-epoch': String(baseEpoch), 'x-ds-format': String(DS_FORMAT) },
       body,
     });
     if (r.status === 409) { const j = await r.json().catch(() => ({})); return { conflict: true, current: j.current }; }
+    if (r.status === 426) {
+      const j = await r.json().catch(() => ({}));
+      const e = new Error(j.error || 'the relay no longer accepts commits from this client — reload the page');
+      e.code = 'STALE_CLIENT';
+      throw e;
+    }
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || `DS commit → ${r.status}`); }
     return r.json();   // { ok, epoch, hash }
   }
@@ -146,6 +160,7 @@ export class DsGroup {
       this.member.importState(saved.member, this.rivetPriv);
       this.leafDir = saved.leafDir || {};
       await this._catchUp();
+      this._assertInStep();
       await this._persist();
       return this.groupKey();
     }
@@ -196,15 +211,24 @@ export class DsGroup {
         catch (err) { err.epLabel = `replay@${x.epoch}(${x.env.commit?.type || '?'}) › ${err.epLabel || err.message}`; throw err; }
       }
     }
+    this._assertInStep();
     await this._persist();
     return this.groupKey();
   }
 
   // ---- commit a membership change, rebasing on a DS conflict -----------------
-  async _commitWithRebase(spec, dir, tries = 5) {
+  // `plan` is { spec, dir }, or a function returning one (or null: nothing left to
+  // do) — evaluated AFTER each catch-up, so a choice that depends on the live tree
+  // (which leaf an add takes, whether it is still needed) is made against the state
+  // the commit actually lands on, not the one it had before a lost race.
+  async _commitWithRebase(plan, tries = 5) {
     if (!this.member) throw new Error('group not loaded');
     for (let i = 0; i < tries; i++) {
       await this._catchUp();
+      this._assertInStep();
+      const planned = typeof plan === 'function' ? plan() : plan;
+      if (!planned) return { epoch: this.member.epoch, groupKey: this.groupKey() };   // nothing to commit
+      const { spec, dir } = planned;
       const snapshot = this.member.exportState();
       const base = this.member.epoch;
       const commit = await this.member.commit(spec);   // mutates member → base+1
@@ -214,21 +238,60 @@ export class DsGroup {
         await this._persist();
         return { epoch: res.epoch, groupKey: this.groupKey() };
       }
-      // lost the epoch race — roll back the speculative commit, catch up, retry
+      // Lost the epoch race — roll back the speculative commit, catch up, retry.
+      // Restore into a FRESH member: a speculative add that grew the tree cannot be
+      // undone in place (growth only goes up), and would leave its leaf seated.
+      this.member = this._newMember();
       this.member.importState(snapshot, this.rivetPriv);
     }
     throw new Error('DS commit failed after retries (persistent epoch conflict)');
   }
 
-  // The leaf the next member takes: the lowest free one (a blank left by a removal
-  // is reused first), or the first leaf of the doubled tree when none is free.
-  // Read from the LIVE member, which may already have grown past the capacity this
-  // group was constructed with.
+  // The leaf the next member takes: the lowest one that is FREE — held by no
+  // address in the public directory and not seated in the tree (a blank left by a
+  // removal is reused first). Past the last leaf, the add grows the tree.
+  //
+  // The directory decides, never the shape alone. "Every leaf below capacity is
+  // taken, so take capacity" handed a sitting member's leaf to a newcomer when the
+  // shape was stale (the library, epoch 21: leaf 8 re-seated over its holder).
   _nextLeaf() {
-    const capacity = this.member?.capacity || this.capacity;
-    const taken = new Set(Object.values(this.leafDir));
-    for (let i = 1; i < capacity; i++) if (!taken.has(i)) return i;
-    return capacity;   // beyond the current tree: the add grows it
+    const taken = new Set(Object.values(this.leafDir).map(Number));
+    const leaves = this.member?.leaves || [];
+    let i = 1;
+    while (taken.has(i) || (leaves[i] && !leaves[i].blank)) i++;
+    return i;
+  }
+
+  // Every leaf the public directory names must EXIST in this member's tree. A copy
+  // whose tree is shorter than the directory it carries has lost its shape — its
+  // K is not the group's, and a commit from it seals path secrets to a tree nobody
+  // else holds (the library's epoch 21 grew 8 → 16 a second time over a sitting
+  // member). It fails here, before it reads or commits, rather than guessing.
+  //
+  // A directory entry at an EMPTY leaf is different: that is a stale claim in the
+  // group's own record, the same for every device (a remove that blanked a leaf the
+  // directory still names). It does not make this copy wrong, so it is not refused;
+  // removeMember corrects it, and isSeated() never counts it as a seat.
+  _assertInStep() {
+    const leaves = this.member?.leaves || [];
+    for (const [address, idx] of Object.entries(this.leafDir)) {
+      if (!leaves[Number(idx)]) {
+        const e = new Error(
+          `this device's copy of the group is out of step with the log: ${address} sits at leaf ${idx}, ` +
+          `which does not exist in this device's tree (capacity ${this.member?.capacity}). ` +
+          'It must not commit — a current key-holder should remove this device from the group and add it again.');
+        e.code = 'OUT_OF_STEP';
+        throw e;
+      }
+    }
+  }
+
+  // Whether `address` holds a seat: named by the directory AND the occupant of
+  // that leaf. A directory entry alone is only a claim.
+  isSeated(address) {
+    const a = String(address).toLowerCase();
+    const leaf = this.leafDir[a];
+    return leaf != null && this._holds(a, leaf);
   }
 
   // Add a member (its rivet pubkey at a free leaf). Authorization (may they be a
@@ -238,21 +301,46 @@ export class DsGroup {
   // the tree, which rotates the committer's path and so advances the epoch; an
   // ordinary add still does not rotate.
   async addMember(address, pub) {
-    const leaf = this._nextLeaf();
-    return this._commitWithRebase({ type: 'add', addLeafIndex: leaf, addPub: pub }, { set: { [String(address).toLowerCase()]: leaf } });
+    const a = String(address).toLowerCase();
+    // Decided after each catch-up: a concurrent key-holder may already have seated
+    // this address (the library's epochs 6–12: one address seated seven times in
+    // seven seconds by responders that each chose before catching up).
+    return this._commitWithRebase(() => {
+      if (this.isSeated(a)) return null;
+      const leaf = this._nextLeaf();
+      return { spec: { type: 'add', addLeafIndex: leaf, addPub: pub }, dir: { set: { [a]: leaf } } };
+    });
   }
 
   // Remove a member: rotates the committer's path so the removed rivet cannot
   // derive the next epoch key (forward secrecy).
+  //
+  // A directory entry whose leaf seats someone else (or no one) is a stale claim,
+  // not a seat: the commit corrects the directory and leaves the leaf's occupant
+  // alone. Removing by leaf index alone evicted the occupant — after the library's
+  // epoch 21, leaf 8 carried two directory entries and seated only one of them.
   async removeMember(address) {
     const a = String(address).toLowerCase();
-    const leaf = this.leafDir[a];
-    if (leaf == null) throw new Error('not a member of this group');
-    return this._commitWithRebase({ type: 'remove', removeLeafIndex: leaf }, { del: [a] });
+    return this._commitWithRebase(() => {
+      const leaf = this.leafDir[a];
+      if (leaf == null) throw new Error('not a member of this group');
+      return this._holds(a, leaf)
+        ? { spec: { type: 'remove', removeLeafIndex: leaf }, dir: { del: [a] } }
+        : { spec: { type: 'update' }, dir: { del: [a] } };
+    });
+  }
+
+  // Whether `address` is the member actually seated at `leaf`: the tree records
+  // each seated leaf's rivet public key, and an address is a function of it.
+  _holds(address, leaf) {
+    const lf = this.member?.leaves?.[Number(leaf)];
+    if (!lf || lf.blank || !lf.pub) return false;
+    const pub = String(lf.pub).startsWith('0x') ? lf.pub : '0x' + lf.pub;
+    return globalThis.ethers.utils.computeAddress(pub).toLowerCase() === address;
   }
 
   // Self-update (post-compromise healing): rotate this member's own path.
-  async update() { return this._commitWithRebase({ type: 'update' }, {}); }
+  async update() { return this._commitWithRebase({ spec: { type: 'update' }, dir: {} }); }
 
   // ---- seat requests: public-read admission via the proposals mailbox --------
   // Membership is the chain's (roleOf); key-delivery is ours. A member with no
@@ -294,7 +382,7 @@ export class DsGroup {
     const reqs = await this.listSeatRequests();
     const done = [];
     for (const q of reqs) {
-      if (this.leafDir[q.address] != null) { done.push(q.id); continue; }   // already seated
+      if (this.isSeated(q.address)) { done.push(q.id); continue; }   // already holds its leaf
       if (isMember && !(await isMember(q.address))) continue;               // not a member per the chain
       try { await this.addMember(q.address, q.pub); done.push(q.id); }
       catch { /* epoch conflict — retry next drain */ }

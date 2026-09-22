@@ -307,6 +307,16 @@ export class Member {
     this.groupKey = state.groupKey && !state.groupKey.startsWith('0x') ? '0x' + state.groupKey : state.groupKey;
     this.initSecret = fromHex(state.initSecret);
     this.secrets = new Map(state.secrets);
+    // Every node the snapshot names must exist in the restored shape. A state that
+    // carries nodes of a taller tree without saying how tall (no `capacity`) would
+    // otherwise load as the short tree with half its nodes silently dropped.
+    for (const n of state.pubs || []) {
+      if (!this._node(n.id)) {
+        const e = new Error(`tree state names node ${n.id}, which a capacity-${this.capacity} tree does not have — its shape was not saved`);
+        e.code = 'OUT_OF_STEP';
+        throw e;
+      }
+    }
     this._loadPublic(state.pubs);
     // Restore the keyring — REPLACE, never merge: a commit rollback relies on
     // importState dropping the speculative epoch's entry. Legacy state persisted
