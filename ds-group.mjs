@@ -146,10 +146,28 @@ export class DsGroup {
       if (e.epoch <= this.member.epoch) continue;
       const env = await this._payload(e.epoch);
       if (!env) continue;
-      this._applyDir(env.dir);
       try { await this.member.apply(env.commit); }
-      catch (err) { err.epLabel = `catchup@${e.epoch}(${env.commit?.type || '?'}) › ${err.epLabel || err.message}`; throw err; }
+      catch (err) {
+        // My own rotating commit, made by another instance of this rivet: take the
+        // state that instance saved (the store is shared) instead of applying it.
+        if (err.code === 'OWN_COMMIT' && await this._adoptSaved(e.epoch)) continue;
+        err.epLabel = `catchup@${e.epoch}(${env.commit?.type || '?'}) › ${err.epLabel || err.message}`;
+        throw err;
+      }
+      this._applyDir(env.dir);
     }
+  }
+
+  // Replace this in-memory member with the saved state, when that state has
+  // reached `epoch` — i.e. it is the committing instance's record of it. Anything
+  // older cannot carry the commit, so the caller fails instead.
+  async _adoptSaved(epoch) {
+    const saved = this.store?.load ? await this.store.load() : null;
+    if (!saved?.member || !(saved.member.epoch >= epoch)) return false;
+    this.member = this._newMember();
+    this.member.importState(saved.member, this.rivetPriv);
+    this.leafDir = saved.leafDir || {};
+    return true;
   }
 
   // ---- load existing state: restore-then-catch-up, else Welcome bootstrap ----

@@ -372,6 +372,18 @@ export class Member {
   // for this member, derives to the root, advances the epoch. Converges to the
   // committer's group key.
   async apply(commit) {
+    // A ROTATING commit from my own leaf was made by another instance of this same
+    // rivet (another tab, or another group object in this one). Its path secrets
+    // were generated there and sealed to everyone but me, so applying it here can
+    // only diverge — silently, with a plausible key from the next rotation on (the
+    // library's 0x159a lost its own epoch-19 key this way). Refuse it untouched;
+    // the committing instance saved the state that carries it.
+    const rotates = commit.type !== 'add' || commit.grow;
+    if (rotates && this.leafIndex >= 0 && commit.committerLeafIndex === this.leafIndex) {
+      const e = new Error('this commit was made from this device\'s own leaf by another instance — load that instance\'s saved state');
+      e.code = 'OWN_COMMIT';
+      throw e;
+    }
     // The shape first, whatever the commit does: the leaf it seats, and every node
     // id its path names, exist only in a tree at least this tall.
     if (commit.capacity) this.growTo(commit.capacity);
@@ -396,7 +408,7 @@ export class Member {
     const myPath = directPath(this._leaf());
     let j = -1, lca = null;
     for (const n of myPath) { const k = cPath.findIndex((c) => c.id === n.id); if (k >= 0) { j = k; lca = n; break; } }
-    if (j < 0) { this._diverge(); return; }
+    if (j < 0) throw this._outOfStep(commit, 'no node of my path is on the committer\'s');
 
     // Adopt the committer's new public path keys.
     for (const e of commit.path) { const node = this._node(e.dNodeId); if (node) { node.pub = e.newPub; node.blank = false; } }
@@ -413,7 +425,7 @@ export class Member {
       const openable = this._privFor(res) || (res.isLeaf && res.leafIndex === this.leafIndex && this.leafDecap);
       if (openable) { box = hit.box; chosen = res; break; }
     }
-    if (!box) { this._diverge(); return; }
+    if (!box) throw this._outOfStep(commit, 'no sealed path secret is addressed to a node I can open');
     // The openable check said this node is mine, but the actual decrypt can still
     // fail (a mismatched sealed box) — label it so the failure names the path.
     let ps;
@@ -432,5 +444,15 @@ export class Member {
   }
 
   _node(id) { const walk = (n) => { if (!n) return null; if (n.id === id) return n; return walk(n.l) || walk(n.r); }; return walk(this.root); }
+  // A REMOVED member cannot follow the group past its removal — that is forward
+  // secrecy, and the only case that diverges quietly.
   _diverge() { this.groupKey = 'DIVERGED-' + this.name + '-' + this.epoch; this.epoch += 1; }
+  // A SEATED member that cannot open a commit is out of step with the tree the
+  // committer holds. That is a fault, not a removal: fail, never carry on with a
+  // placeholder key that the next rotation turns into a plausible wrong one.
+  _outOfStep(commit, why) {
+    const e = new Error(`cannot apply the ${commit.type} from leaf ${commit.committerLeafIndex} at epoch ${this.epoch + 1}: ${why}`);
+    e.code = 'OUT_OF_STEP';
+    return e;
+  }
 }
