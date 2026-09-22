@@ -178,6 +178,12 @@ export class DsGroup {
       this.member.importState(saved.member, this.rivetPriv);
       this.leafDir = saved.leafDir || {};
       await this._catchUp();
+      // Removed since that save — the catch-up applied this device's own removal,
+      // which leaves it on a placeholder key by design (forward secrecy). That is
+      // not a readable group: start again from the log, which seats this device
+      // from a newer Welcome if it was added back, or reports NO_SEAT so the
+      // key-request starts — "waiting for your key", never an undecryptable page.
+      if (!this._seatedAsMember()) return this._bootstrapFromWelcome();
       this._assertInStep();
       await this._persist();
       return this.groupKey();
@@ -186,6 +192,7 @@ export class DsGroup {
   }
 
   async _bootstrapFromWelcome() {
+    this.leafDir = {};   // rebuilt from the whole log below, never layered over a copy
     const log = await this._log(0);
     if (!log.length) throw new Error('no group commits to load');
     const envs = [];
@@ -302,6 +309,16 @@ export class DsGroup {
         throw e;
       }
     }
+  }
+
+  // Whether THIS device's member state is seated where the directory places it.
+  // Different from isSeated(this.address): a device removed and later added back
+  // at a new leaf is seated by the log, but a member restored from its old save
+  // still stands on the old, blanked leaf with the placeholder its removal left.
+  _seatedAsMember() {
+    const leaf = this.leafDir[this.address];
+    return leaf != null && this.member?.leafIndex === Number(leaf)
+      && !!this.member.leaves[Number(leaf)] && !this.member.leaves[Number(leaf)].blank;
   }
 
   // Whether `address` holds a seat: named by the directory AND the occupant of

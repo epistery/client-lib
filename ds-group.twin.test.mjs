@@ -8,6 +8,7 @@
 //   REFUSE   Member.apply refuses a rotating commit from its own leaf, untouched
 //   ADOPT    a stale DsGroup takes the committing twin's saved state and converges
 //   NO COVER with no saved state that reaches the commit, catch-up fails loudly
+//   REMOVED  a removed device's stale save reports NO_SEAT; added back, it bootstraps
 //
 //   node client-lib/ds-group.twin.test.mjs
 
@@ -96,6 +97,32 @@ const lonely = { member: stale, leafDir: clone(stored.leafDir) };
 const C = twin({ load: async () => clone(lonely), save: async () => {} });
 try { await C.load(); bad('a twin without the committing state loaded'); }
 catch (e) { e.code === 'OWN_COMMIT' ? ok('with no saved state reaching the commit, catch-up fails loudly') : bad(`wrong failure: ${e.code} ${e.message}`); }
+
+// REMOVED — a device removed since its last save reloads that save. The catch-up
+// applies its own removal (a quiet divergence, by design); load must not hand back
+// that placeholder key as a readable group. It reports NO_SEAT, so the key-request
+// starts; once added back, the same stale save bootstraps from the new Welcome.
+const R = kp();
+const cR = await F.commit({ type: 'add', addLeafIndex: 12, addPub: R.pub });
+push(cR, { set: { [R.addr]: 12 } });
+const rSave = (() => { const m = new Member('R', 8, stack); return m; })();
+await rSave.applyWelcome(cR.welcome, 12, R.priv);
+const rStored = { member: rSave.exportState(), leafDir: clone(dir) };
+push(await F.commit({ type: 'remove', removeLeafIndex: 12 }), { del: [R.addr] });
+const rGroup = () => new DsGroup({
+  relayUrl: 'https://x', contract: '0xc', session: '0xs',
+  address: R.addr, rivetPriv: null, rivetPub: R.pub,
+  sign: async () => 'Bot test', leafDecap: async (e) => ecdh(R.priv, e),
+  stack, fetchImpl: fakeFetch, capacity: 8, store: { load: async () => clone(rStored), save: async () => {} },
+});
+try { await rGroup().load(); bad('a removed device loaded its stale save as a readable group'); }
+catch (e) { e.code === 'NO_SEAT' ? ok('removed device reports NO_SEAT, not a placeholder key') : bad(`wrong failure: ${e.code} ${e.message}`); }
+const cR2 = await F.commit({ type: 'add', addLeafIndex: 13, addPub: R.pub });
+push(cR2, { set: { [R.addr]: 13 } });
+try {
+  const g = rGroup(); const K = await g.load();
+  K === F.groupKey ? ok('added back, the same stale save bootstraps from the new Welcome') : bad('re-added device got the wrong key');
+} catch (e) { bad(`re-added device failed to load: ${e.code} ${e.message}`); }
 
 console.log('\n' + (fails === 0 ? 'PASS' : `FAILED ${fails}`));
 process.exit(fails === 0 ? 0 : 1);
