@@ -5,8 +5,9 @@
 // group, and the write/read pattern every plugin now uses —
 //     write: { epoch: ctx.keys.epoch, ...encrypt(ctx.keys.K) }
 //     read : decrypt(ctx.keys.keyFor(rec.epoch), rec)
-// — decrypts correctly across a rotation, for stayers, newcomers, and untagged
-// legacy records.
+// — decrypts correctly across a rotation, for stayers and newcomers — and that an
+// UNTAGGED record gets no key at all, before or after a rotation (strict: it is a
+// fault to report, never a key to guess; mjs recipes, 2026-09-23).
 //
 //   node client-lib/treekem.ctx-contract.test.mjs
 
@@ -83,7 +84,8 @@ const doc2 = await writeDoc(fKeys, 'ctx doc-2 after a non-rotating add');
 // A legacy record written now under the current key, but with NO epoch tag.
 const legacy = await writeDoc(fKeys, 'untagged legacy record'); delete legacy.epoch;
 check(legacy.epoch === undefined, 'legacy record carries no epoch tag');
-check((await readDoc(fKeys, legacy)) === 'untagged legacy record', 'MIGRATION: untagged record reads via the current key');
+check(fKeys.keyFor(legacy.epoch) === null, 'STRICT: an untagged record gets no key');
+check((await readDoc(fKeys, legacy)) === null, 'STRICT: an untagged record is not opened with the current key');
 
 // rotate: founder removes alice (bob stays so a member remains)
 const bob = await add(founder, 'bob');
@@ -95,6 +97,14 @@ check((await readDoc(ctxKeys(facade(bob.m)), doc2)) === 'ctx doc-2 after a non-r
 
 const doc3 = await writeDoc(fKeys, 'ctx doc-3 at the post-removal epoch');
 check((await readDoc(ctxKeys(facade(bob.m)), doc3)) === 'ctx doc-3 at the post-removal epoch', 'ctx reads post-rotation doc-3 (K2)');
+
+// The incident: an untagged record read after the first rotation. Under the old
+// rule it resolved to the NEW key and failed as "undecryptable". Strict: still no
+// key; and the re-tag (the last epoch its key was in force) makes it readable.
+check(fKeys.keyFor(legacy.epoch) === null, 'STRICT after rotation: the untagged record still gets no key (never the new one)');
+const retagged = { ...legacy, epoch: doc2.epoch };
+check((await readDoc(fKeys, retagged)) === 'untagged legacy record', 'RE-TAG: tagged with the last epoch its key was in force, it opens after the rotation');
+check((await readDoc(ctxKeys(facade(bob.m)), retagged)) === 'untagged legacy record', 'RE-TAG: a stayer reads it too');
 
 // newcomer after the rotation: her ctx reads the whole past.
 const zoe = await add(founder, 'zoe');

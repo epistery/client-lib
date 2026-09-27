@@ -17,6 +17,7 @@
     "./treekem": "./treekem.mjs",
     "./treekem-kdf": "./treekem-kdf.mjs",
     "./ds-group": "./ds-group.mjs",
+    "./sealed": "./sealed.mjs",
     "./adslot": "./adslot.mjs",
     "./components/*": "./components/*",
     "./package.json": "./package.json"
@@ -34,6 +35,7 @@
     "treekem.mjs",
     "treekem-kdf.mjs",
     "ds-group.mjs",
+    "sealed.mjs",
     "adslot.mjs",
     "components/",
     "README.md"

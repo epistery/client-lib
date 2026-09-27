@@ -178,11 +178,16 @@ export class Member {
   // The key that sealed a record tagged with `epoch`: the retained key from the
   // most recent rotation at or before it. A non-rotating add advances the epoch
   // WITHOUT changing the key, so a record's epoch can land between rotations —
-  // floor to the rotation in force when it was written. A null/absent tag is an
-  // untagged legacy record → the current key (the migration rule: anything
-  // readable today was written under the current key).
+  // floor to the rotation in force when it was written.
+  //
+  // A null/absent tag gets NO key. It used to get the current key ("anything
+  // readable today was written under the current key"), which is true only until
+  // the session's first rotation — then every untagged record silently resolved to
+  // the wrong key (mjs recipes + SunriseWalks, 2026-09-22/23). Every writer tags;
+  // the live data was re-tagged (tmp/retag-untagged.js). An untagged record is a
+  // fault to report, never a key to guess.
   keyForEpoch(epoch) {
-    if (epoch == null) return this.groupKey;
+    if (epoch == null) return null;
     let bestEpoch = -1, key = null;
     for (const [e, k] of this.keyring) if (e <= epoch && e > bestEpoch) { bestEpoch = e; key = k; }
     return key;

@@ -82,7 +82,7 @@ export class DsGroup {
   epoch() { return this.member?.epoch || 0; }
   // The key that sealed a record tagged with `epoch` — the read path for content
   // written under an earlier epoch (floor lookup over the retained keyring). A
-  // null/absent tag resolves to the current key (untagged legacy record).
+  // null/absent tag resolves to NO key: an untagged record is a fault, not a guess.
   keyForEpoch(epoch) { return this.member ? this.member.keyForEpoch(epoch) : null; }
 
   // ---- DS reads (public) -----------------------------------------------------
