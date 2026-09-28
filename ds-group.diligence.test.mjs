@@ -17,7 +17,7 @@ import { DsGroup, DS_FORMAT } from './ds-group.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv } from './treekem-kdf.mjs';
 import { sealedKeys } from './sealed.mjs';
 import * as cipher from './cipher.mjs';
-import { botSigner, credOf } from './ds-test-kit.mjs';
+import { botSigner, credOf, anyoneMayCommit } from './ds-test-kit.mjs';
 
 let failures = 0; const check = (c, m) => c ? console.log('  ok  : ' + m) : (console.log('  FAIL: ' + m), failures++);
 const stack = cryptoStack();
@@ -45,7 +45,7 @@ const inject = async (env, k) => {
   const auth = await botSigner(k.priv, '0xo')('POST', '0xs/_ds/commit', raw);
   ds.push(env); raws.push(raw); creds.push(credOf(auth)); signers.push(k.addr);
 };
-const groupFor = (k) => new DsGroup({ relayUrl: 'https://x', contract: '0xo', session: '0xs', address: k.addr, rivetPriv: k.priv, rivetPub: k.pub,
+const groupFor = (k) => new DsGroup({ chain: anyoneMayCommit, relayUrl: 'https://x', contract: '0xo', session: '0xs', address: k.addr, rivetPriv: k.priv, rivetPub: k.pub,
   sign: async (...a) => { postingAs = k.addr; return botSigner(k.priv, '0xo')(...a); }, stack, fetchImpl: fakeFetch, capacity: 8, store: storeFor(k) });
 
 console.log('\n[diligence] every commit states its tree');

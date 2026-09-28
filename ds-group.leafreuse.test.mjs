@@ -10,6 +10,7 @@
 
 globalThis.ethers = (await import('ethers')).ethers;
 import { DsGroup } from './ds-group.mjs';
+import { anyoneMayCommit } from './ds-test-kit.mjs';
 import { Member } from './treekem.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv, ecdh } from './treekem-kdf.mjs';
 
@@ -52,7 +53,7 @@ const fakeFetch = async (url) => {
 };
 
 // ── the PHONE loads as a non-extractable rivet, leaf reused before it ──────────
-const group = new DsGroup({
+const group = new DsGroup({ chain: anyoneMayCommit,
   relayUrl: 'https://x', contract: '0xcontract', session: '0xsession',
   address: phone.addr, rivetPriv: null, rivetPub: phone.pub,
   sign: async () => 'unused-in-load', leafDecap: async (encHex) => ecdh(phone.priv, encHex),

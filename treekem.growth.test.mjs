@@ -9,6 +9,7 @@
 globalThis.ethers = (await import('ethers')).ethers;
 import { Member } from './treekem.mjs';
 import { DsGroup } from './ds-group.mjs';
+import { anyoneMayCommit } from './ds-test-kit.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv, ecdh } from './treekem-kdf.mjs';
 
 const E = globalThis.ethers;
@@ -105,7 +106,7 @@ const fakeFetch = async (url) => {
   if (m) { const e = ds[Number(m[1]) - 1]; return { ok: true, status: 200, arrayBuffer: async () => enc({ commit: e.commit, dir: e.dir }) }; }
   return { ok: false, status: 404 };
 };
-const group = new DsGroup({
+const group = new DsGroup({ chain: anyoneMayCommit,
   relayUrl: 'https://x', contract: '0xc', session: '0xs',
   address: newcomer.addr, rivetPriv: null, rivetPub: newcomer.pub,
   sign: async () => 'unused', leafDecap: async (encHex) => ecdh(newcomer.priv, encHex),

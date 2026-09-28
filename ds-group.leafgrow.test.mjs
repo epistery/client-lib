@@ -23,7 +23,7 @@ globalThis.ethers = (await import('ethers')).ethers;
 import { DsGroup, DS_FORMAT, treeHashOf } from './ds-group.mjs';
 import { Member } from './treekem.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv } from './treekem-kdf.mjs';
-import { botSigner, credOf } from './ds-test-kit.mjs';
+import { botSigner, credOf, anyoneMayCommit } from './ds-test-kit.mjs';
 
 const E = globalThis.ethers;
 let fails = 0;
@@ -103,7 +103,7 @@ async function observerCommits(spec, d) {
   push(commit, d);
   Object.assign(ds[ds.length - 1], { raw, cred: credOf(auth) });
 }
-const groupFrom = (saved) => new DsGroup({
+const groupFrom = (saved) => new DsGroup({ chain: anyoneMayCommit,
   relayUrl: 'https://x', contract: '0xc', session: '0xs',
   address: founder.addr, rivetPriv: founder.priv, rivetPub: founder.pub,
   sign: botSigner(founder.priv, '0xc'), stack, fetchImpl: fakeFetch, capacity: 8,

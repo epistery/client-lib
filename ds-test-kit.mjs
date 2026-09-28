@@ -23,3 +23,7 @@ export function botSigner(privHex, contract) {
 
 // The credential part of an Authorization header, as the relay stores it.
 export const credOf = (authorization) => (typeof authorization === 'string' && authorization.startsWith('Bot ') ? authorization.slice(4) : null);
+
+// A chain on which everyone may commit — for tests about something other than the
+// chain. What a fresh device asks the chain is tested in ds-group.chain.test.mjs.
+export const anyoneMayCommit = { isRivet: async () => true, roleOf: async () => 3, mayCommit: async () => true, endpoints: [] };

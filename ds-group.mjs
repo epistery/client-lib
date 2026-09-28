@@ -104,6 +104,12 @@ export class DsGroup {
     // computeSharedSecret — (ephemeralEncHex) => Promise<Uint8Array shared>.
     // Null for server participants (extractable derived keys use rivetPriv).
     this.leafDecap = opts.leafDecap || null;
+    // chain: a chain reader (chain-read.mjs) the CLIENT uses itself — straight to
+    // the RPC endpoints, never through the relay. With it, a device joining from
+    // scratch confirms on chain that whoever seated it may commit to this session,
+    // and that the founder of any restore it follows is an owner rivet.
+    if (!opts.chain?.mayCommit) throw new Error('DsGroup: a chain reader is required (chain-read.mjs) — a group is joined on the chain\'s word, never a server\'s');
+    this.chain = opts.chain;
     this.member = null;
     this.leafDir = {};   // addressLower -> leafIndex (public directory)
   }
@@ -175,7 +181,38 @@ export class DsGroup {
     let address;
     try { address = lc(globalThis.ethers.utils.verifyMessage(c.message, c.signature)); } catch { return { fault: 'has a signature that does not verify' }; }
     if (address !== lc(c.address)) return { fault: 'has a signature from a key other than the one it names' };
-    return { address };
+    return { address, identity: c.identity ? lc(c.identity) : null };
+  }
+
+  // THE anchor of a device that joins from scratch. Every later commit is checked
+  // against the tree this Welcome hands over (_applyChecked), so this is the one
+  // thing such a device takes on trust — and it takes it from the chain, never from
+  // a server: the Welcome must be signed by the member at its committer leaf, and
+  // that member must be one the chain lets commit to this session (an owner rivet,
+  // or a section writer). A relay could build a whole group around a device; it
+  // can be neither. A forged restore reaches a new device only through such a
+  // Welcome, so this covers it too.
+  async _welcomeIsTheGroups(tree, commit, epoch, cred) {
+    const refuse = (why) => { const e = new Error(`the Welcome that seats this device ${why} — refusing it`); e.code = 'FORGED_WELCOME'; throw e; };
+    const s = this._verifiedSigner(epoch, cred);
+    if (s.fault) refuse(s.fault);
+    const lf = tree.leaves[commit.committerLeafIndex];
+    if (!lf || lf.blank || addressOfPub(lf.pub) !== s.address) refuse('is not signed by the member who seated it');
+    if (!(await this._onChain(() => this.chain.mayCommit(this.contract, this.session, s.address, s.identity)))) {
+      refuse(`was signed by ${s.address}, who may not commit to this session on chain`);
+    }
+  }
+
+  // A chain read that must answer. No answer is not "no": the device refuses to
+  // join and says why, rather than joining a group it could not check.
+  async _onChain(read) {
+    try { return await read(); }
+    catch (err) {
+      if (err.code !== 'CHAIN_UNREACHABLE') throw err;
+      const e = new Error(`could not confirm this group against the chain (${err.message}) — try again`);
+      e.code = 'CHAIN_UNREACHABLE';
+      throw e;
+    }
   }
 
   // Whether a reinit at `epoch` is genuine for THIS member: signed by its founder,
@@ -185,7 +222,7 @@ export class DsGroup {
     if ((commit.format || 0) < 4) return !this.signedFrom;   // pre-signature restore: accepted only before signing began
     const s = this._verifiedSigner(epoch, cred);
     if (s.fault || s.address !== addressOfPub(commit.founderPub)) return false;
-    if (!this.member) return true;   // a fresh device has no prior tree to check against (phase 2: the chain)
+    if (!this.member) return true;   // a fresh device has no prior tree: its Welcome is its anchor (_welcomeIsTheGroups)
     return this.member.leaves.some((lf) => lf && !lf.blank && lf.pub && addressOfPub(lf.pub) === s.address);
   }
 
@@ -488,23 +525,17 @@ export class DsGroup {
       && lc(x.env.commit.addPub) === lc(this.rivetPub));
     const addEntry = mine.length ? mine[mine.length - 1] : null;
     if (!addEntry) throw new Error('no Welcome for this rivet — ask a present key-holder to re-add this device');
-    this.member = this._newMember();
     // applyWelcome adopts the live tree (incl. my seated leaf) and the current
     // key — the non-rotating add means there is nothing to replay for my own add.
-    try { await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv); }
+    // The Welcome is judged before this device takes anything from it.
+    const m = this._newMember();
+    try { await m.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv); }
     catch (err) { err.epLabel = `bootstrap Welcome@${addEntry.epoch} › ${err.epLabel || err.message}`; throw err; }
-    // A signed Welcome must be signed by the member at its committer leaf in the tree
-    // it hands over — otherwise it is not the group's, whoever served it.
     if ((addEntry.env.commit.format || 0) >= 4) {
-      const s = this._verifiedSigner(addEntry.epoch, credOf(addEntry.epoch));
-      const lf = this.member.leaves[addEntry.env.commit.committerLeafIndex];
-      if (s.fault || !lf || lf.blank || addressOfPub(lf.pub) !== s.address) {
-        const e = new Error(`the Welcome that seats this device ${s.fault || 'is not signed by the member who seated it'} — refusing it`);
-        e.code = 'FORGED_WELCOME';
-        throw e;
-      }
+      await this._welcomeIsTheGroups(m, addEntry.env.commit, addEntry.epoch, credOf(addEntry.epoch));
       this.signedFrom = addEntry.epoch;
     }
+    this.member = m;
     if (carry) for (const [e, k] of carry) if (!this.member.keyring.has(Number(e))) this.member.keyring.set(Number(e), k);
     // The Welcome's tree is the one the add produced: confirm it against the hash
     // the add records, so this device can judge the commits that follow.

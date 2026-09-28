@@ -16,7 +16,7 @@ globalThis.ethers = (await import('ethers')).ethers;
 import { DsGroup, DS_FORMAT } from './ds-group.mjs';
 import { Member } from './treekem.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv, ecdh } from './treekem-kdf.mjs';
-import { botSigner, credOf } from './ds-test-kit.mjs';
+import { botSigner, credOf, anyoneMayCommit } from './ds-test-kit.mjs';
 
 const E = globalThis.ethers;
 let fails = 0;
@@ -63,7 +63,7 @@ const fakeFetch = async (url, opts = {}) => {
 // ONE store for the rivet, as localStorage is one per browser.
 let stored = { member: twinSeed.exportState(), leafDir: clone(dir) };
 const sharedStore = { load: async () => clone(stored), save: async (s) => { stored = clone(s); } };
-const twin = (store) => new DsGroup({
+const twin = (store) => new DsGroup({ chain: anyoneMayCommit,
   relayUrl: 'https://x', contract: '0xc', session: '0xs',
   address: T.addr, rivetPriv: null, rivetPub: T.pub,
   sign: botSigner(T.priv, '0xc'), leafDecap: async (e) => ecdh(T.priv, e),
@@ -116,7 +116,7 @@ const rSave = (() => { const m = new Member('R', 8, stack); return m; })();
 await rSave.applyWelcome(cR.welcome, 12, R.priv);
 const rStored = { member: rSave.exportState(), leafDir: clone(dir) };
 push(await F.commit({ type: 'remove', removeLeafIndex: 12 }), { del: [R.addr] });
-const rGroup = () => new DsGroup({
+const rGroup = () => new DsGroup({ chain: anyoneMayCommit,
   relayUrl: 'https://x', contract: '0xc', session: '0xs',
   address: R.addr, rivetPriv: null, rivetPub: R.pub,
   sign: botSigner(R.priv, '0xc'), leafDecap: async (e) => ecdh(R.priv, e),

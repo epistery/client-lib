@@ -19,7 +19,7 @@ import { DsGroup, DS_FORMAT, treeHashOf } from './ds-group.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv } from './treekem-kdf.mjs';
 import { sealedKeys } from './sealed.mjs';
 import * as cipher from './cipher.mjs';
-import { botSigner, credOf } from './ds-test-kit.mjs';
+import { botSigner, credOf, anyoneMayCommit } from './ds-test-kit.mjs';
 
 let failures = 0; const check = (c, m) => c ? console.log('  ok  : ' + m) : (console.log('  FAIL: ' + m), failures++);
 const stack = cryptoStack();
@@ -42,7 +42,7 @@ const fakeFetch = async (url, opts = {}) => {
 };
 const stores = new Map();
 const storeFor = (k) => { if (!stores.has(k.addr)) { let saved = null; stores.set(k.addr, { load: async () => saved, save: async (s) => { saved = JSON.parse(JSON.stringify(s)); } }); } return stores.get(k.addr); };
-const groupFor = (k) => new DsGroup({ relayUrl: 'https://x', contract: CONTRACT, session: SESSION, address: k.addr, rivetPriv: k.priv, rivetPub: k.pub,
+const groupFor = (k) => new DsGroup({ chain: anyoneMayCommit, relayUrl: 'https://x', contract: CONTRACT, session: SESSION, address: k.addr, rivetPriv: k.priv, rivetPub: k.pub,
   sign: botSigner(k.priv, CONTRACT), stack, fetchImpl: fakeFetch, capacity: 8, store: storeFor(k) });
 // What the RELAY can do: put any bytes in the log, with any credential — but it can
 // only SIGN with keys it holds (R), never a member's.
