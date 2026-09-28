@@ -45,8 +45,14 @@ export function sealedKeys(group, crypto) {
   const currentEpoch = () => (group ? group.epoch() : null);
   const keyAt = (epoch) => (group && isEpoch(epoch) ? group.keyForEpoch(epoch) || null : null);
 
+  // A group that cannot follow its own log (a commit it cannot apply) still reads
+  // up to the epoch before it, but seals nothing: its "current" key is no longer
+  // the group's, and anything sealed under it would be unreadable to the rest.
+  const stuck = () => group?.stuck || null;
+
   // The key and its epoch, read TOGETHER — never on either side of an await.
   function writeKey() {
+    if (stuck()) throw new Error(`this session cannot be written: its key history stops at epoch ${stuck().epoch} (${stuck().reason}); it reads up to there until an owner restores it`);
     const K = currentKey();
     const epoch = currentEpoch();
     if (!K) throw new Error(MESSAGES['no-key']);
@@ -69,7 +75,9 @@ export function sealedKeys(group, crypto) {
 
   return {
     // True when this device can seal (holds the current key).
-    get ready() { return !!currentKey() && isEpoch(currentEpoch()); },
+    get ready() { return !!currentKey() && isEpoch(currentEpoch()) && !stuck(); },
+    // Why this device can read but not write, or null: { epoch, code, reason, signer }.
+    get stuck() { return stuck(); },
     // The current epoch — for display and diagnostics only; seal() stamps it.
     get epoch() { return currentEpoch(); },
 

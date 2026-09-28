@@ -92,11 +92,17 @@ B.groupKey() === F.groupKey ? ok('stale twin adopted the saved state and agrees 
 B.keyForEpoch(growth.epoch) === F.keyForEpoch(growth.epoch) ? ok('its keyring carries the growth epoch') : bad('growth epoch missing from the twin keyring');
 !String(B.groupKey()).startsWith('DIVERGED') ? ok('no placeholder key') : bad('placeholder key');
 
-// NO COVER — a twin whose store never saw the commit fails instead of guessing.
+// NO COVER — a twin whose store never saw the commit does not guess. It loads
+// STUCK at that commit (ds-group.wedge.test.mjs): readable up to the epoch before
+// it, named OWN_COMMIT, and it neither seals nor commits.
 const lonely = { member: stale, leafDir: clone(stored.leafDir) };
 const C = twin({ load: async () => clone(lonely), save: async () => {} });
-try { await C.load(); bad('a twin without the committing state loaded'); }
-catch (e) { e.code === 'OWN_COMMIT' ? ok('with no saved state reaching the commit, catch-up fails loudly') : bad(`wrong failure: ${e.code} ${e.message}`); }
+try {
+  await C.load();
+  C.stuck?.code === 'OWN_COMMIT' && C.stuck.epoch === growth.epoch && C.epoch() === growth.epoch - 1 && !String(C.groupKey()).startsWith('DIVERGED')
+    ? ok('with no saved state reaching the commit, the twin is STUCK before it (OWN_COMMIT), not guessing')
+    : bad(`expected STUCK at ${growth.epoch} with OWN_COMMIT, got ${JSON.stringify(C.stuck)} epoch ${C.epoch()}`);
+} catch (e) { bad(`a twin without the committing state threw instead of loading stuck: ${e.code} ${e.message}`); }
 
 // REMOVED — a device removed since its last save reloads that save. The catch-up
 // applies its own removal (a quiet divergence, by design); load must not hand back

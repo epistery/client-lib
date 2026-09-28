@@ -30,13 +30,33 @@ import { cryptoStack } from './treekem-kdf.mjs';
 // reaches a tab still running older code, which would otherwise commit from a tree
 // shape it cannot represent (the library's epoch 21, from a tab open since before
 // growth shipped).
-export const DS_FORMAT = 2;
+//
+// 3 = every commit states the tree it was built on (`parentHash`) and the tree it
+// produces (`treeHash`) — hashes of the PUBLIC tree. A committer may post only when
+// its tree matches the one the log last recorded, so a stale or diverged device
+// stops before it commits. A member skips, deterministically, a commit built on a
+// tree other than the log's, or one whose public part is invalid (an add over an
+// occupied leaf, ...): every in-step member reaches the same verdict, so the group
+// moves on without it. Faults only visible privately (a path secret that will not
+// open) still leave a member STUCK, never skipping — members could disagree there.
+export const DS_FORMAT = 3;
 
 // The size a NEW group's tree starts at. Not a ceiling: a full tree doubles when
 // the next member is seated (treekem growTree), so a group grows with its
 // membership — one primitive at any size, which is what the tree was adopted for.
 const DEFAULT_CAPACITY = 8;
 const encBytes = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+
+// Hash of a member's PUBLIC tree: shape plus each node's public key. A blank node
+// hashes as blank whatever stale key it holds, so every member hashes the same tree
+// the same way.
+function treeHashOf(member) {
+  const nodes = member._snapshotPublic()
+    .map((n) => [n.id, n.blank ? 0 : 1, n.blank ? null : String(n.pub || '').toLowerCase()])
+    .sort((a, b) => a[0] - b[0]);
+  return globalThis.ethers.utils.sha256(encBytes({ c: member.capacity, n: nodes }));
+}
+const shortHash = (h) => String(h || '').slice(0, 10);
 const decBytes = (buf) => JSON.parse(new TextDecoder().decode(new Uint8Array(buf)));
 const fromB64 = (b64) => { const s = atob(b64); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
 
@@ -80,6 +100,18 @@ export class DsGroup {
   _u(p) { return `${this.relayUrl}/ds/${this.contract}/${this.session}${p}`; }
   groupKey() { return this.member?.groupKey || null; }
   epoch() { return this.member?.epoch || 0; }
+  // Set when a commit in the log cannot be applied: { epoch, code, reason, signer }.
+  // The member stays at the epoch before it, holding every key up to there — the
+  // session reads, and nothing is committed or sealed until the group is restored.
+  // One commit that members cannot apply (a buggy, stale or hostile writer) used to
+  // leave every member with NO key at all, history included.
+  stuck = null;
+  // The public-tree hash the log last recorded AND this member was confirmed to
+  // hold (null before any hash-bearing commit). Commits built on another tree are
+  // skipped only while this holds.
+  inStep = null;
+  // Commits this member skipped as invalid: [{ epoch, reason, signer }].
+  skipped = [];
   // The key that sealed a record tagged with `epoch` — the read path for content
   // written under an earlier epoch (floor lookup over the retained keyring). A
   // null/absent tag resolves to NO key: an untagged record is a fault, not a guess.
@@ -90,6 +122,11 @@ export class DsGroup {
     const r = await this.fetch(this._u(`/log?since=${since}`));
     if (!r.ok) return [];
     return r.json();
+  }
+  async _head() {
+    const r = await this.fetch(this._u('/head'));
+    if (!r.ok) throw new Error(`DS head → ${r.status}`);
+    return r.json();   // { epoch, head }
   }
   async _payload(epoch) {
     const r = await this.fetch(this._u(`/commit/${epoch}`));
@@ -124,14 +161,16 @@ export class DsGroup {
   // Awaited: the store may self-encrypt (async), and a committer's own path
   // secret cannot be re-derived from the log — losing the last save would strand
   // the founder on reload. Every mutating path awaits this.
-  async _persist() { if (this.store?.save) await this.store.save({ member: this.member.exportState(), leafDir: this.leafDir }); }
-  _applyDir(dir) { if (!dir) return; if (dir.set) Object.assign(this.leafDir, dir.set); if (dir.del) for (const a of dir.del) delete this.leafDir[String(a).toLowerCase()]; }
+  async _persist() { if (this.store?.save) await this.store.save({ member: this.member.exportState(), leafDir: this.leafDir, inStep: this.inStep }); }
+  _applyDir(dir) { if (!dir) return; if (dir.reset) this.leafDir = {}; if (dir.set) Object.assign(this.leafDir, dir.set); if (dir.del) for (const a of dir.del) delete this.leafDir[String(a).toLowerCase()]; }
 
   // ---- create a brand-new group (founder at leaf 0, epoch 1) -----------------
   async create() {
     this.member = this._newMember();
     this.member.seat(0, this.rivetPriv, this.rivetPub);
     const commit = await this.member.commit({ type: 'update' });   // establishes epoch 1
+    commit.treeHash = treeHashOf(this.member);
+    this.inStep = commit.treeHash;
     this.leafDir = { [this.address]: 0 };
     const res = await this._post({ commit, dir: { set: { [this.address]: 0 } } }, 0);
     if (res.conflict) throw new Error('a group already exists at this session');
@@ -139,21 +178,136 @@ export class DsGroup {
     return this.groupKey();
   }
 
+  // The epoch of a reinit by ANOTHER device after `epoch` in `log`, or null.
+  async _laterReinit(log, epoch) {
+    for (const e of log) {
+      if (e.epoch <= epoch) continue;
+      const env = await this._payload(e.epoch);
+      const c = env?.commit;
+      if (c?.type === 'reinit' && String(c.founderPub || '').toLowerCase() !== String(this.rivetPub || '').toLowerCase()) return e.epoch;
+    }
+    return null;
+  }
+
+  // Apply a commit with the diligence checks (DS_FORMAT 3), all or nothing:
+  // Member.apply can change the tree before it fails, so a failure puts back the
+  // member it started from — never a half-applied tree.
+  // Returns 'skipped' for
+  // a commit every in-step member rejects the same way; throws (→ STUCK) when this
+  // member cannot tell; otherwise applies it all or nothing and confirms the tree
+  // it produces against the hash the commit records.
+  async _applyChecked(commit, meta = {}) {
+    const mine = treeHashOf(this.member);
+    const confirmed = !!this.inStep && this.inStep === mine;
+    const skip = (reason) => {
+      this.member.epoch += 1;   // the log's epoch passes; keys, tree and directory do not change
+      this.skipped.push({ epoch: meta.epoch ?? this.member.epoch, reason, signer: meta.signer || null });
+      return 'skipped';
+    };
+    const outOfStep = (why) => { const e = new Error(why); e.code = 'OUT_OF_STEP'; return e; };
+    if (commit.parentHash && commit.parentHash !== mine) {
+      if (confirmed) return skip(`built on a tree other than the log's (${shortHash(commit.parentHash)} ≠ ${shortHash(mine)})`);
+      throw outOfStep(`this device's tree (${shortHash(mine)}) is not the one this commit was built on (${shortHash(commit.parentHash)}), and it cannot confirm which is the log's`);
+    }
+    const fault = this._publicFault(commit);
+    if (fault) {
+      if (confirmed) return skip(fault);
+      throw outOfStep(`${fault} — and this device cannot confirm its tree against the log`);
+    }
+    const before = this.member.exportState();
+    try {
+      await this.member.apply(commit);
+      if (commit.treeHash) {
+        const after = treeHashOf(this.member);
+        if (after !== commit.treeHash) throw outOfStep(`after applying, this device's tree (${shortHash(after)}) is not the one the commit records (${shortHash(commit.treeHash)})`);
+        this.inStep = after;
+      } else {
+        this.inStep = null;   // a commit without a hash (older format): the tree is no longer confirmed
+      }
+    } catch (err) {
+      this.member = this._newMember();
+      this.member.importState(before, this.rivetPriv);
+      throw err;
+    }
+    return 'applied';
+  }
+
+  // A fault in a commit's PUBLIC part, judged on this member's public tree — the
+  // same verdict for every member that holds the log's tree. null when none.
+  _publicFault(commit) {
+    const m = this.member;
+    const cap = Math.max(m.capacity, Number(commit.capacity) || 0);
+    const leafAt = (i) => (Number.isInteger(i) && i >= 0 && i < m.leaves.length ? m.leaves[i] : null);
+    if (commit.type === 'reinit') return null;
+    const committer = leafAt(commit.committerLeafIndex);
+    if (!committer || committer.blank) return `committed from leaf ${commit.committerLeafIndex}, which holds no member`;
+    if (commit.type === 'add') {
+      const i = commit.addLeafIndex;
+      if (!Number.isInteger(i) || i < 0 || i >= cap) return `adds at leaf ${i}, outside the tree`;
+      const lf = leafAt(i);
+      if (lf && !lf.blank) return `adds over leaf ${i}, which already holds a member`;
+      if (!commit.addPub) return 'adds a member with no public key';
+    }
+    if (commit.type === 'remove') {
+      const lf = leafAt(commit.removeLeafIndex);
+      if (!lf || lf.blank) return `removes leaf ${commit.removeLeafIndex}, which holds no member`;
+    }
+    return null;
+  }
+
+  // Record that the log cannot be followed past `epoch`. The member is left at the
+  // epoch before it (see _applyChecked), keys intact.
+  _stick(epoch, err, signer = null) {
+    this.stuck = { epoch, code: err.code || 'APPLY_FAILED', reason: err.epLabel || err.message, signer };
+  }
+  _stuckError() {
+    const s = this.stuck;
+    const e = new Error(`this group cannot move past epoch ${s.epoch} (${s.reason}) — it reads up to epoch ${s.epoch - 1}; nothing can be written until an owner restores the group`);
+    e.code = 'STUCK';
+    e.stuck = s;
+    return e;
+  }
+
   // ---- catch up a LIVE member by applying commits after its epoch ------------
-  async _catchUp() {
+  // `tolerate`: a commit that cannot be applied leaves the group STUCK (readable up
+  // to the epoch before it) instead of throwing — used on load, so one bad commit
+  // never costs a member the history it already holds. NO_SEAT still throws.
+  async _catchUp({ tolerate = false } = {}) {
     const log = await this._log(this.member.epoch);
     for (const e of log) {
       if (e.epoch <= this.member.epoch) continue;
       const env = await this._payload(e.epoch);
       if (!env) continue;
-      try { await this.member.apply(env.commit); }
+      // A REINIT ends the tree this member is in (reinit()). Its own reinit, made by
+      // another instance of this rivet, is adopted from the shared store; anyone
+      // else's means this member must join the new tree — load() bootstraps it from
+      // its Welcome there, carrying the keys it already holds.
+      if (env.commit?.type === 'reinit') {
+        const mine = String(env.commit.founderPub || '').toLowerCase() === String(this.rivetPub || '').toLowerCase();
+        if (mine && await this._adoptSaved(e.epoch)) continue;
+        if (mine) { const err = new Error('this device restored the group from another instance whose saved state is not here'); err.code = 'OWN_COMMIT'; err.epLabel = `catchup@${e.epoch}(reinit) › ${err.message}`; if (tolerate) { this._stick(e.epoch, err, e.signer || null); return; } throw err; }
+        this.restoredAt = e.epoch;
+        return;
+      }
+      let outcome;
+      try { outcome = await this._applyChecked(env.commit, { epoch: e.epoch, signer: e.signer }); }
       catch (err) {
         // My own rotating commit, made by another instance of this rivet: take the
         // state that instance saved (the store is shared) instead of applying it.
         if (err.code === 'OWN_COMMIT' && await this._adoptSaved(e.epoch)) continue;
         err.epLabel = `catchup@${e.epoch}(${env.commit?.type || '?'}) › ${err.epLabel || err.message}`;
+        if (tolerate && err.code !== 'NO_SEAT') {
+          // A commit that will not apply may already have been answered: an owner
+          // restored the group past it. Then this member joins the new tree rather
+          // than stopping at the wedge.
+          const later = await this._laterReinit(log, e.epoch);
+          if (later) { this.restoredAt = later; return; }
+          this._stick(e.epoch, err, e.signer || null);
+          return;
+        }
         throw err;
       }
+      if (outcome === 'skipped') continue;   // an invalid commit: its directory is not applied either
       this._applyDir(env.dir);
     }
   }
@@ -167,6 +321,7 @@ export class DsGroup {
     this.member = this._newMember();
     this.member.importState(saved.member, this.rivetPriv);
     this.leafDir = saved.leafDir || {};
+    this.inStep = saved.inStep || null;
     return true;
   }
 
@@ -177,7 +332,15 @@ export class DsGroup {
       this.member = this._newMember();
       this.member.importState(saved.member, this.rivetPriv);
       this.leafDir = saved.leafDir || {};
-      await this._catchUp();
+      this.inStep = saved.inStep || null;
+      this.skipped = [];
+      this.stuck = null;
+      this.restoredAt = null;
+      await this._catchUp({ tolerate: true });
+      // The group was restored (another owner device's reinit): join the new tree,
+      // keeping every key this device already held.
+      if (this.restoredAt) return this._bootstrapFromWelcome({ carry: this.member.keyring });
+      if (this.stuck) { await this._persist(); return this.groupKey(); }
       // Removed since that save — the catch-up applied this device's own removal,
       // which leaves it on a placeholder key by design (forward secrecy). That is
       // not a readable group: start again from the log, which seats this device
@@ -191,16 +354,23 @@ export class DsGroup {
     return this._bootstrapFromWelcome();
   }
 
-  async _bootstrapFromWelcome() {
+  // `carry`: keys this device already holds from an earlier tree (a restored group),
+  // kept beside whatever its new Welcome delivers.
+  async _bootstrapFromWelcome({ carry = null } = {}) {
+    this.stuck = null;
+    this.restoredAt = null;
+    this.inStep = null;
+    this.skipped = [];
     this.leafDir = {};   // rebuilt from the whole log below, never layered over a copy
-    const log = await this._log(0);
-    if (!log.length) throw new Error('no group commits to load');
-    const envs = [];
-    for (const e of log) {
-      const env = await this._payload(e.epoch);
-      envs.push({ epoch: e.epoch, env });
-      this._applyDir(env?.dir);
-    }
+    const full = await this._log(0);
+    if (!full.length) throw new Error('no group commits to load');
+    const all = [];
+    for (const e of full) all.push({ epoch: e.epoch, env: await this._payload(e.epoch) });
+    // Only the current tree counts: everything from the latest reinit on.
+    const lastReinit = [...all].reverse().find((x) => x.env?.commit?.type === 'reinit');
+    const envs = lastReinit ? all.filter((x) => x.epoch >= lastReinit.epoch) : all;
+    const log = full.filter((e) => envs.some((x) => x.epoch === e.epoch));
+    for (const x of envs) this._applyDir(x.env?.dir);
     const myLeaf = this.leafDir[this.address];
     if (myLeaf == null) {
       // Not seated yet. If the chain recognizes this rivet as a member (e.g. a
@@ -229,16 +399,67 @@ export class DsGroup {
     // key — the non-rotating add means there is nothing to replay for my own add.
     try { await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv); }
     catch (err) { err.epLabel = `bootstrap Welcome@${addEntry.epoch} › ${err.epLabel || err.message}`; throw err; }
+    if (carry) for (const [e, k] of carry) if (!this.member.keyring.has(Number(e))) this.member.keyring.set(Number(e), k);
+    // The Welcome's tree is the one the add produced: confirm it against the hash
+    // the add records, so this device can judge the commits that follow.
+    if (addEntry.env.commit.treeHash && addEntry.env.commit.treeHash === treeHashOf(this.member)) this.inStep = addEntry.env.commit.treeHash;
     for (const x of envs) {
       if (x.epoch > addEntry.epoch && x.env) {
-        this._applyDir(x.env.dir);
-        try { await this.member.apply(x.env.commit); }
-        catch (err) { err.epLabel = `replay@${x.epoch}(${x.env.commit?.type || '?'}) › ${err.epLabel || err.message}`; throw err; }
+        let outcome;
+        try { outcome = await this._applyChecked(x.env.commit, { epoch: x.epoch, signer: log.find((l) => l.epoch === x.epoch)?.signer || null }); }
+        catch (err) {
+          err.epLabel = `replay@${x.epoch}(${x.env.commit?.type || '?'}) › ${err.epLabel || err.message}`;
+          // Stuck, not lost: keep everything up to the commit that will not apply,
+          // and a directory that describes that tree, not the one after it.
+          this._stick(x.epoch, err, log.find((l) => l.epoch === x.epoch)?.signer || null);
+          this.leafDir = {};
+          for (const y of envs) if (y.epoch < x.epoch) this._applyDir(y.env?.dir);
+          await this._persist();
+          return this.groupKey();
+        }
       }
+    }
+    // A skipped commit's directory entry is not the group's: rebuild without them.
+    if (this.skipped.length) {
+      const skippedAt = new Set(this.skipped.map((x) => x.epoch));
+      this.leafDir = {};
+      for (const x of envs) if (!skippedAt.has(x.epoch)) this._applyDir(x.env?.dir);
     }
     this._assertInStep();
     await this._persist();
     return this.groupKey();
+  }
+
+  // ---- restore a wedged group: start a new tree past the commit nobody can apply
+  //
+  // This device becomes the founder (leaf 0) of a fresh tree at the next DS epoch,
+  // carrying its WHOLE keyring forward — every Welcome it gives out later hands a
+  // newcomer the history up to the wedge. The relay accepts a reinit only from a
+  // rivet of the owner contract. The caller then seats the owner's keys and the
+  // previous members (ownerSeats.restoreGroup). Works from a stuck group, which is
+  // the point, and from a healthy one.
+  async reinit() {
+    const carried = new Map(this.member?.keyring || []);
+    for (let i = 0; i < 5; i++) {
+      const { epoch: base } = await this._head();
+      const m = this._newMember();
+      m.seat(0, this.rivetPriv, this.rivetPub);
+      m.epoch = base;
+      m.keyring = new Map(carried);
+      const upd = await m.commit({ type: 'update' });   // base+1: a fresh key, retained beside the carried ones
+      const commit = { type: 'reinit', capacity: m.capacity, committerLeafIndex: 0, founderPub: this.rivetPub, path: upd.path, treeHash: treeHashOf(m) };
+      const res = await this._post({ commit, dir: { reset: true, set: { [this.address]: 0 } } }, base);
+      if (res.conflict) continue;
+      this.member = m;
+      this.leafDir = { [this.address]: 0 };
+      this.stuck = null;
+      this.restoredAt = null;
+      this.inStep = commit.treeHash;
+      this.skipped = [];
+      await this._persist();
+      return { epoch: m.epoch, groupKey: this.groupKey() };
+    }
+    throw new Error('restore failed after retries (persistent epoch conflict)');
   }
 
   // ---- commit a membership change, rebasing on a DS conflict -----------------
@@ -248,17 +469,35 @@ export class DsGroup {
   // the commit actually lands on, not the one it had before a lost race.
   async _commitWithRebase(plan, tries = 5) {
     if (!this.member) throw new Error('group not loaded');
+    if (this.stuck) throw this._stuckError();
     for (let i = 0; i < tries; i++) {
       await this._catchUp();
+      if (this.restoredAt) {
+        const e = new Error(`this group was restored at epoch ${this.restoredAt} — reload to join the new tree`);
+        e.code = 'RESTORED';
+        throw e;
+      }
       this._assertInStep();
+      // Diligence before committing: this device's tree must be the one the log
+      // last recorded. A stale tab or a diverged copy stops HERE, before it posts a
+      // commit the rest of the group would have to reject.
+      const parentHash = treeHashOf(this.member);
+      if (this.inStep && this.inStep !== parentHash) {
+        const e = new Error(`this device's copy of the group (${shortHash(parentHash)}) is not the tree the log records (${shortHash(this.inStep)}) — reload before changing the group`);
+        e.code = 'OUT_OF_STEP';
+        throw e;
+      }
       const planned = typeof plan === 'function' ? plan() : plan;
       if (!planned) return { epoch: this.member.epoch, groupKey: this.groupKey() };   // nothing to commit
       const { spec, dir } = planned;
       const snapshot = this.member.exportState();
       const base = this.member.epoch;
       const commit = await this.member.commit(spec);   // mutates member → base+1
+      commit.parentHash = parentHash;
+      commit.treeHash = treeHashOf(this.member);
       const res = await this._post({ commit, dir: dir || {} }, base);
       if (!res.conflict) {
+        this.inStep = commit.treeHash;
         this._applyDir(dir);
         await this._persist();
         return { epoch: res.epoch, groupKey: this.groupKey() };
