@@ -66,6 +66,8 @@ export default class Toast extends Component {
     this.controls.append(this.okButton);
     this.cancelButton = document.createElement('button');
     this.controls.append(this.cancelButton);
+    // One click handler for the life of the toast (it was re-added on every notify).
+    this.window.addEventListener('click', () => this.clickHandler());
     window.toast = this;
   }
 
@@ -76,11 +78,23 @@ export default class Toast extends Component {
     this.window.classList.add('active', flavor);
   }
 
+  // An error or a warning stays until it is clicked away — a message that vanishes
+  // before it can be read is not reported, it is lost. While one is showing, a
+  // status or success does not cover it (the progress of whatever failed would),
+  // and a further error is added beneath it rather than replacing it.
   notify(message, flavor) {
+    const sticky = flavor === 'error' || flavor === 'warning';
+    if (this.sticky && this.window.classList.contains('active')) {
+      if (!sticky) return;
+      this.message.insertAdjacentHTML('beforeend', `<hr>${message}`);
+      if (flavor === 'error') { this.window.classList.remove('warning'); this.window.classList.add('error'); }
+      return;
+    }
     this.close();
     this.display(message, flavor);
-    this.timer = setTimeout(this.close.bind(this), 2500);
-    this.window.addEventListener('click', this.clickHandler.bind(this));
+    this.sticky = sticky;
+    this.window.title = sticky ? 'Click to dismiss' : '';
+    if (!sticky) this.timer = setTimeout(this.close.bind(this), 2500);
   }
 
   async prompt(message, options) {
@@ -103,6 +117,7 @@ export default class Toast extends Component {
 
   close() {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.sticky = false;
     this.window.classList.remove('active');
   }
 
