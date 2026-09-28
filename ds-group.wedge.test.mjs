@@ -17,12 +17,13 @@ import { DsGroup, DS_FORMAT } from './ds-group.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv } from './treekem-kdf.mjs';
 import { sealedKeys } from './sealed.mjs';
 import * as cipher from './cipher.mjs';
+import { botSigner, credOf } from './ds-test-kit.mjs';
 
 let failures = 0; const check = (c, m) => c ? console.log('  ok  : ' + m) : (console.log('  FAIL: ' + m), failures++);
 const stack = cryptoStack();
 const kp = () => { const b = new Uint8Array(32); crypto.getRandomValues(b); const priv = privFromSecret(b); const pub = pubFromPriv(priv); return { priv, pub, addr: ethers.utils.computeAddress(pub).toLowerCase() }; };
 
-const ds = []; const signers = [];
+const ds = []; const signers = []; const raws = []; const creds = [];
 const enc = (o) => new TextEncoder().encode(JSON.stringify(o));
 const dec = (b) => JSON.parse(new TextDecoder().decode(b));
 let postingAs = null;
@@ -30,21 +31,27 @@ const fakeFetch = async (url, opts = {}) => {
   if (opts.method === 'POST' && /\/commit$/.test(url)) {
     if (Number(opts.headers['x-ds-format']) !== DS_FORMAT) return { ok: false, status: 426, json: async () => ({}) };
     if (Number(opts.headers['x-ds-epoch']) !== ds.length) return { ok: false, status: 409, json: async () => ({ current: ds.length }) };
-    ds.push(dec(opts.body)); signers.push(postingAs); return { ok: true, json: async () => ({ ok: true, epoch: ds.length }) };
+    ds.push(dec(opts.body)); raws.push(opts.body); creds.push(credOf(opts.headers.authorization)); signers.push(postingAs); return { ok: true, json: async () => ({ ok: true, epoch: ds.length }) };
   }
   if (/\/head$/.test(url)) return { ok: true, json: async () => ({ epoch: ds.length, head: null }) };
   if (/\/log\?/.test(url)) {
     const since = Number(new URL(url).searchParams.get('since') || 0);
-    return { ok: true, json: async () => ds.map((e, i) => ({ epoch: i + 1, signer: signers[i] })).filter((e) => e.epoch > since) };
+    return { ok: true, json: async () => ds.map((e, i) => ({ epoch: i + 1, signer: signers[i], cred: creds[i] || null })).filter((e) => e.epoch > since) };
   }
   const m = url.match(/\/commit\/(\d+)/);
-  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => enc(e) } : { ok: false, status: 404 }; }
+  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => raws[Number(m[1]) - 1] || enc(e) } : { ok: false, status: 404 }; }
   return { ok: false, status: 404 };
 };
 const stores = new Map();
 const storeFor = (k) => { if (!stores.has(k.addr)) { let saved = null; stores.set(k.addr, { load: async () => saved, save: async (s) => { saved = JSON.parse(JSON.stringify(s)); } }); } return stores.get(k.addr); };
+// Put a commit in the log as `k` would post it: exact bytes, signed by k.
+const inject = async (env, k) => {
+  const raw = enc(env);
+  const auth = await botSigner(k.priv, '0xowner')('POST', '0xs/_ds/commit', raw);
+  ds.push(env); raws.push(raw); creds.push(credOf(auth)); signers.push(k.addr);
+};
 const groupFor = (k) => new DsGroup({ relayUrl: 'https://x', contract: '0xowner', session: '0xs', address: k.addr, rivetPriv: k.priv, rivetPub: k.pub,
-  sign: async () => { postingAs = k.addr; return 'Bot test'; }, stack, fetchImpl: fakeFetch, capacity: 8, store: storeFor(k) });
+  sign: async (...a) => { postingAs = k.addr; return botSigner(k.priv, '0xowner')(...a); }, stack, fetchImpl: fakeFetch, capacity: 8, store: storeFor(k) });
 
 console.log('\n[wedge] one unappliable commit');
 const A = kp(), B = kp(), C = kp(), W = kp();
@@ -55,10 +62,16 @@ const kA = sealedKeys(gA, cipher);
 const before = await kA.seal('written before the bad commit');
 const beforeEpoch = gA.epoch();
 
-// W posts a commit nobody can apply: a rotation whose path secrets are sealed to no one.
+// W posts a commit nobody can apply: a rotation whose path secrets are sealed to no
+// one. It passes every PUBLIC check — signed by W from W's own leaf, built on the
+// log's tree — and fails only privately, the case diligence cannot skip. (The relay
+// accepts rotations only from an owner device or an admin; this is one of those
+// gone wrong.)
 const good = ds.length;
-ds.push({ commit: { type: 'update', committerLeafIndex: 3, capacity: 8, path: [{ dNodeId: 12, newPub: kp().pub, encs: [] }, { dNodeId: 8, newPub: kp().pub, encs: [] }, { dNodeId: 0, newPub: kp().pub, encs: [] }] }, dir: {} });
-signers.push(W.addr);
+const gW0 = groupFor(W); await gW0.load();
+await inject({ commit: { type: 'update', format: DS_FORMAT, committerLeafIndex: Number(gW0.leafDir[W.addr]), capacity: 8,
+  parentHash: gW0.inStep, treeHash: '0x00',
+  path: [{ dNodeId: 12, newPub: kp().pub, encs: [] }, { dNodeId: 8, newPub: kp().pub, encs: [] }, { dNodeId: 0, newPub: kp().pub, encs: [] }] }, dir: {} }, W);
 const bad = ds.length;
 
 for (const [name, k] of [['owner A', A], ['member B', B]]) {

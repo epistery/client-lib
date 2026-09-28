@@ -20,9 +20,10 @@
 //   node client-lib/ds-group.leafgrow.test.mjs
 
 globalThis.ethers = (await import('ethers')).ethers;
-import { DsGroup, DS_FORMAT } from './ds-group.mjs';
+import { DsGroup, DS_FORMAT, treeHashOf } from './ds-group.mjs';
 import { Member } from './treekem.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv } from './treekem-kdf.mjs';
+import { botSigner, credOf } from './ds-test-kit.mjs';
 
 const E = globalThis.ethers;
 let fails = 0;
@@ -42,14 +43,14 @@ const dir = {};
 const push = (commit, d) => { ds.push({ epoch: ds.length + 1, commit, dir: d }); Object.assign(dir, d.set || {}); };
 // The OBSERVER (leaf 1) joins by Welcome and applies every later commit: the
 // independent check that a committer's K is the group's K.
-let obs = null;
+let obs = null; let obsKp = null;
 const observe = async (commit) => { if (obs) await obs.apply(commit); };
 push(await fm.commit({ type: 'update' }), { set: { [founder.addr]: 0 } });
 for (let i = 1; i <= 7; i++) {
   const m = kp();
   const c = await fm.commit({ type: 'add', addLeafIndex: i, addPub: m.pub });
   push(c, { set: { [m.addr]: i } });
-  if (i === 1) { obs = new Member('observer', 8, stack); await obs.applyWelcome(c.welcome, 1, m.priv); }
+  if (i === 1) { obs = new Member('observer', 8, stack); await obs.applyWelcome(c.welcome, 1, m.priv); obsKp = m; }
   else await observe(c);
 }
 const preGrowth = { member: fm.exportState(), leafDir: clone(dir) };          // 8 leaves, epoch 8
@@ -73,27 +74,39 @@ const fakeFetch = async (url, opts = {}) => {
       // The observer commits first: a plain add of W at the next free leaf.
       loseRaces--;
       const W = kp(); const at = Math.max(...Object.values(dir)) + 1;
-      push(await obs.commit({ type: 'add', addLeafIndex: at, addPub: W.pub }), { set: { [W.addr]: at } });
+      await observerCommits({ type: 'add', addLeafIndex: at, addPub: W.pub }, { set: { [W.addr]: at } });
       return { ok: false, status: 409, json: async () => ({ current: ds.length }) };
     }
     if (base !== ds.length) return { ok: false, status: 409, json: async () => ({ current: ds.length }) };
     const env = dec(opts.body);
     push(env.commit, env.dir);
+    Object.assign(ds[ds.length - 1], { raw: opts.body, cred: credOf(opts.headers.authorization) });
     await observe(env.commit);
     return { ok: true, json: async () => ({ ok: true, epoch: ds.length }) };
   }
   if (/\/log\?/.test(url)) {
     const since = Number(new URL(url).searchParams.get('since') || 0);
-    return { ok: true, json: async () => ds.filter(e => e.epoch > since).map(e => ({ epoch: e.epoch })) };
+    return { ok: true, json: async () => ds.filter(e => e.epoch > since).map(e => ({ epoch: e.epoch, cred: e.cred || null })) };
   }
   const m = url.match(/\/commit\/(\d+)/);
-  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => enc({ commit: e.commit, dir: e.dir }) } : { ok: false, status: 404 }; }
+  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => e.raw || enc({ commit: e.commit, dir: e.dir }) } : { ok: false, status: 404 }; }
   return { ok: false, status: 404 };
 };
+// The observer commits as a real member now does (DS_FORMAT 4): the format, the
+// public-tree hashes before and after, and a credential signed by its own leaf key.
+async function observerCommits(spec, d) {
+  const parentHash = treeHashOf(obs);
+  const commit = await obs.commit(spec);
+  Object.assign(commit, { format: DS_FORMAT, parentHash, treeHash: treeHashOf(obs) });
+  const raw = enc({ commit, dir: d });
+  const auth = await botSigner(obsKp.priv, '0xc')('POST', '0xs/_ds/commit', raw);
+  push(commit, d);
+  Object.assign(ds[ds.length - 1], { raw, cred: credOf(auth) });
+}
 const groupFrom = (saved) => new DsGroup({
   relayUrl: 'https://x', contract: '0xc', session: '0xs',
   address: founder.addr, rivetPriv: founder.priv, rivetPub: founder.pub,
-  sign: async () => 'Bot test', stack, fetchImpl: fakeFetch, capacity: 8,
+  sign: botSigner(founder.priv, '0xc'), stack, fetchImpl: fakeFetch, capacity: 8,
   store: { load: async () => clone(saved), save: async () => {} },
 });
 
@@ -136,8 +149,7 @@ g.groupKey() === obs.groupKey ? ok('committer and observer agree on K after the 
 // one of them seated. Removing the stale one must not evict the occupant.
 const T = kp(), S = kp();
 const at = Math.max(...Object.values(dir)) + 1;
-const cT = await obs.commit({ type: 'add', addLeafIndex: at, addPub: T.pub });
-push(cT, { set: { [S.addr]: at, [T.addr]: at } });   // S's claim is stale; T sits at `at`
+await observerCommits({ type: 'add', addLeafIndex: at, addPub: T.pub }, { set: { [S.addr]: at, [T.addr]: at } });   // S's claim is stale; T sits at `at`
 await g.removeMember(S.addr);
 const last = ds[ds.length - 1];
 last.commit.type === 'update' ? ok('stale claim removed by a directory-only update') : bad(`stale claim removed with a ${last.commit.type} commit`);

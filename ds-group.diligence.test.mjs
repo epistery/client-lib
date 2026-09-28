@@ -17,32 +17,39 @@ import { DsGroup, DS_FORMAT } from './ds-group.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv } from './treekem-kdf.mjs';
 import { sealedKeys } from './sealed.mjs';
 import * as cipher from './cipher.mjs';
+import { botSigner, credOf } from './ds-test-kit.mjs';
 
 let failures = 0; const check = (c, m) => c ? console.log('  ok  : ' + m) : (console.log('  FAIL: ' + m), failures++);
 const stack = cryptoStack();
 const kp = () => { const b = new Uint8Array(32); crypto.getRandomValues(b); const priv = privFromSecret(b); const pub = pubFromPriv(priv); return { priv, pub, addr: ethers.utils.computeAddress(pub).toLowerCase() }; };
-const ds = []; const signers = []; let postingAs = null;
+const ds = []; const signers = []; const raws = []; const creds = []; let postingAs = null;
 const enc = (o) => new TextEncoder().encode(JSON.stringify(o));
 const dec = (b) => JSON.parse(new TextDecoder().decode(b));
 const fakeFetch = async (url, opts = {}) => {
   if (opts.method === 'POST' && /\/commit$/.test(url)) {
     if (Number(opts.headers['x-ds-format']) !== DS_FORMAT) return { ok: false, status: 426, json: async () => ({}) };
     if (Number(opts.headers['x-ds-epoch']) !== ds.length) return { ok: false, status: 409, json: async () => ({ current: ds.length }) };
-    ds.push(dec(opts.body)); signers.push(postingAs); return { ok: true, json: async () => ({ ok: true, epoch: ds.length }) };
+    ds.push(dec(opts.body)); raws.push(opts.body); creds.push(credOf(opts.headers.authorization)); signers.push(postingAs); return { ok: true, json: async () => ({ ok: true, epoch: ds.length }) };
   }
   if (/\/head$/.test(url)) return { ok: true, json: async () => ({ epoch: ds.length }) };
-  if (/\/log\?/.test(url)) { const since = Number(new URL(url).searchParams.get('since') || 0); return { ok: true, json: async () => ds.map((e, i) => ({ epoch: i + 1, signer: signers[i] })).filter((e) => e.epoch > since) }; }
+  if (/\/log\?/.test(url)) { const since = Number(new URL(url).searchParams.get('since') || 0); return { ok: true, json: async () => ds.map((e, i) => ({ epoch: i + 1, signer: signers[i], cred: creds[i] || null })).filter((e) => e.epoch > since) }; }
   const m = url.match(/\/commit\/(\d+)/);
-  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => enc(e) } : { ok: false, status: 404 }; }
+  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => raws[Number(m[1]) - 1] || enc(e) } : { ok: false, status: 404 }; }
   return { ok: false, status: 404 };
 };
 const stores = new Map();
 const storeFor = (k) => { if (!stores.has(k.addr)) { let saved = null; stores.set(k.addr, { load: async () => saved, save: async (s) => { saved = JSON.parse(JSON.stringify(s)); } }); } return stores.get(k.addr); };
+// Put a commit in the log as `k` would post it: exact bytes, signed by k.
+const inject = async (env, k) => {
+  const raw = enc(env);
+  const auth = await botSigner(k.priv, '0xo')('POST', '0xs/_ds/commit', raw);
+  ds.push(env); raws.push(raw); creds.push(credOf(auth)); signers.push(k.addr);
+};
 const groupFor = (k) => new DsGroup({ relayUrl: 'https://x', contract: '0xo', session: '0xs', address: k.addr, rivetPriv: k.priv, rivetPub: k.pub,
-  sign: async () => { postingAs = k.addr; return 'Bot test'; }, stack, fetchImpl: fakeFetch, capacity: 8, store: storeFor(k) });
+  sign: async (...a) => { postingAs = k.addr; return botSigner(k.priv, '0xo')(...a); }, stack, fetchImpl: fakeFetch, capacity: 8, store: storeFor(k) });
 
 console.log('\n[diligence] every commit states its tree');
-check(DS_FORMAT === 3, 'commit format 3');
+check(DS_FORMAT === 4, 'commit format 4');
 const A = kp(), B = kp(), C = kp(), X = kp();
 const gA = groupFor(A); await gA.create();
 await gA.addMember(B.addr, B.pub); await gA.addMember(C.addr, C.pub);
@@ -70,9 +77,12 @@ const head = ds.length;
 
 // SKIP: commits no in-step member will accept, posted by a writer running other code.
 const lastHash = ds[head - 1].commit.treeHash;
-ds.push({ commit: { type: 'update', committerLeafIndex: 1, capacity: 8, parentHash: '0xdeadbeef', treeHash: '0x00', path: [] }, dir: { set: { ['0x' + 'ee'.repeat(20)]: 5 } } }); signers.push(B.addr);
-ds.push({ commit: { type: 'add', committerLeafIndex: 0, capacity: 8, addLeafIndex: 1, addPub: kp().pub, parentHash: lastHash, treeHash: '0x00', path: [] }, dir: { set: { ['0x' + 'dd'.repeat(20)]: 1 } } }); signers.push(A.addr);
-ds.push({ commit: { type: 'remove', committerLeafIndex: 0, capacity: 8, removeLeafIndex: 6, parentHash: lastHash, treeHash: '0x00', path: [] }, dir: {} }); signers.push(A.addr);
+// Each is genuinely signed by the member at its committer leaf, so it reaches the
+// check it is here to exercise.
+const leafB = Number(gA.leafDir[B.addr]);
+await inject({ commit: { type: 'update', format: DS_FORMAT, committerLeafIndex: leafB, capacity: 8, parentHash: '0xdeadbeef', treeHash: '0x00', path: [] }, dir: { set: { ['0x' + 'ee'.repeat(20)]: 5 } } }, B);
+await inject({ commit: { type: 'add', format: DS_FORMAT, committerLeafIndex: 0, capacity: 8, addLeafIndex: leafB, addPub: kp().pub, parentHash: lastHash, treeHash: '0x00', path: [] }, dir: { set: { ['0x' + 'dd'.repeat(20)]: 1 } } }, A);
+await inject({ commit: { type: 'remove', format: DS_FORMAT, committerLeafIndex: 0, capacity: 8, removeLeafIndex: 6, parentHash: lastHash, treeHash: '0x00', path: [] }, dir: {} }, A);
 for (const [name, k] of [['owner A', A], ['member C', C]]) {
   const g = groupFor(k); await g.load();
   check(!g.stuck && g.skipped.length === 3, `${name}: skips all three invalid commits, and is not stuck`);
@@ -94,14 +104,16 @@ check(!gX.stuck && gX.inStep && (await sealedKeys(gX, cipher).open(before)).ok, 
 // which the library's log really contains at epoch 21). Judging it now would strand
 // every device that replays that history.
 {
-  ds.length = 0; signers.length = 0; stores.clear();
+  ds.length = 0; signers.length = 0; raws.length = 0; creds.length = 0; stores.clear();
   const L = kp(), M = kp(), N = kp();
   const gL = groupFor(L); await gL.create();
   await gL.addMember(M.addr, M.pub);
-  for (const e of ds) { delete e.commit.parentHash; delete e.commit.treeHash; }   // strip to the old format
+  // Strip to the old format — no format, no hashes, no credential — as history
+  // written before these rules really is.
+  ds.forEach((e, i) => { delete e.commit.format; delete e.commit.parentHash; delete e.commit.treeHash; raws[i] = null; creds[i] = null; });
   // An old-format add over M's occupied leaf, as the old code could post (non-rotating).
   const mLeaf = Number(gL.leafDir[M.addr]);
-  ds.push({ commit: { type: 'add', committerLeafIndex: 0, capacity: 8, addLeafIndex: mLeaf, addPub: N.pub, path: [], welcome: null }, dir: { set: { [N.addr]: mLeaf } } }); signers.push(L.addr);
+  ds.push({ commit: { type: 'add', committerLeafIndex: 0, capacity: 8, addLeafIndex: mLeaf, addPub: N.pub, path: [], welcome: null }, dir: { set: { [N.addr]: mLeaf } } }); signers.push(L.addr); raws.push(null); creds.push(null);
   stores.clear();   // M replays the whole log from its Welcome, as a device with no saved state does
   const gM = groupFor(M); await gM.load();
   check(!gM.stuck && gM.epoch() === ds.length, 'LEGACY: a device replaying old-format history applies a commit the new rules would reject, as it always did — not stuck');

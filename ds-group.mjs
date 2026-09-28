@@ -39,7 +39,16 @@ import { cryptoStack } from './treekem-kdf.mjs';
 // occupied leaf, ...): every in-step member reaches the same verdict, so the group
 // moves on without it. Faults only visible privately (a path secret that will not
 // open) still leave a member STUCK, never skipping — members could disagree there.
-export const DS_FORMAT = 3;
+//
+// 4 = every commit is SIGNED, and members check it themselves. The relay serves
+// each commit's credential (the committer's own signed message, binding its
+// address to the SHA-256 of these exact bytes); a member verifies the signature and
+// that the signer holds the committer's leaf in its own tree — a restore, that it
+// is signed by its founder, who sat in the tree it replaces. The relay can then add
+// nothing to a group: it cannot sign as a member. The format is stated inside the
+// commit, and after a member has seen a format-4 commit an older one is a
+// downgrade: invalid, so credentials cannot be stripped to slip a commit past.
+export const DS_FORMAT = 4;
 
 // The size a NEW group's tree starts at. Not a ceiling: a full tree doubles when
 // the next member is seated (treekem growTree), so a group grows with its
@@ -50,13 +59,23 @@ const encBytes = (obj) => new TextEncoder().encode(JSON.stringify(obj));
 // Hash of a member's PUBLIC tree: shape plus each node's public key. A blank node
 // hashes as blank whatever stale key it holds, so every member hashes the same tree
 // the same way.
-function treeHashOf(member) {
+export function treeHashOf(member) {
   const nodes = member._snapshotPublic()
     .map((n) => [n.id, n.blank ? 0 : 1, n.blank ? null : String(n.pub || '').toLowerCase()])
     .sort((a, b) => a[0] - b[0]);
   return globalThis.ethers.utils.sha256(encBytes({ c: member.capacity, n: nodes }));
 }
 const shortHash = (h) => String(h || '').slice(0, 10);
+const lc = (a) => String(a || '').toLowerCase();
+const addressOfPub = (pub) => { try { return lc(globalThis.ethers.utils.computeAddress(String(pub).startsWith('0x') ? pub : '0x' + pub)); } catch { return null; } };
+const sha256hexOf = (bytes) => globalThis.ethers.utils.sha256(bytes).slice(2).toLowerCase();
+function decodeCred(b64url) {
+  let b = String(b64url || '').replace(/-/g, '+').replace(/_/g, '/');
+  while (b.length % 4) b += '=';
+  const bin = atob(b);
+  const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return JSON.parse(new TextDecoder().decode(u));
+}
 const decBytes = (buf) => JSON.parse(new TextDecoder().decode(new Uint8Array(buf)));
 const fromB64 = (b64) => { const s = atob(b64); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
 
@@ -112,6 +131,11 @@ export class DsGroup {
   inStep = null;
   // Commits this member skipped as invalid: [{ epoch, reason, signer }].
   skipped = [];
+  // The first epoch at which this member saw a SIGNED (format 4) commit; from then
+  // on an unsigned or older-format commit is a downgrade. Persisted.
+  signedFrom = null;
+  // Raw commit bytes by epoch, as fetched — a credential signs these exact bytes.
+  _raw = new Map();
   // The key that sealed a record tagged with `epoch` — the read path for content
   // written under an earlier epoch (floor lookup over the retained keyring). A
   // null/absent tag resolves to NO key: an untagged record is a fault, not a guess.
@@ -132,7 +156,37 @@ export class DsGroup {
     const r = await this.fetch(this._u(`/commit/${epoch}`));
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`DS commit/${epoch} → ${r.status}`);
-    return decBytes(await r.arrayBuffer());
+    const raw = new Uint8Array(await r.arrayBuffer());
+    this._raw.set(epoch, raw);
+    return decBytes(raw);
+  }
+
+  // Who signed the commit at `epoch`, verified HERE from the credential the relay
+  // serves: { address } or { fault }. Never the relay's own `signer` field.
+  _verifiedSigner(epoch, cred) {
+    if (!cred) return { fault: 'carries no signature' };
+    let c;
+    try { c = decodeCred(cred); } catch { return { fault: 'has an unreadable signature' }; }
+    const lines = String(c?.message || '').split('\n');
+    if (lines.length !== 6 || lines[0] !== 'epistery-storage-write' || lines[1] !== 'POST') return { fault: 'is signed for something other than a commit' };
+    if (lc(lines[2]) !== lc(this.contract) || lc(lines[3]) !== lc(`${this.session}/_ds/commit`)) return { fault: 'is signed for another session' };
+    const raw = this._raw.get(epoch);
+    if (!raw || lc(lines[4]) !== sha256hexOf(raw)) return { fault: 'has a signature that does not cover these bytes' };
+    let address;
+    try { address = lc(globalThis.ethers.utils.verifyMessage(c.message, c.signature)); } catch { return { fault: 'has a signature that does not verify' }; }
+    if (address !== lc(c.address)) return { fault: 'has a signature from a key other than the one it names' };
+    return { address };
+  }
+
+  // Whether a reinit at `epoch` is genuine for THIS member: signed by its founder,
+  // who sat in the tree it replaces (this member's current one). A relay cannot
+  // restart a group — it holds no seat.
+  _reinitAccepted(commit, epoch, cred) {
+    if ((commit.format || 0) < 4) return !this.signedFrom;   // pre-signature restore: accepted only before signing began
+    const s = this._verifiedSigner(epoch, cred);
+    if (s.fault || s.address !== addressOfPub(commit.founderPub)) return false;
+    if (!this.member) return true;   // a fresh device has no prior tree to check against (phase 2: the chain)
+    return this.member.leaves.some((lf) => lf && !lf.blank && lf.pub && addressOfPub(lf.pub) === s.address);
   }
 
   // ---- DS write (authorized: on-chain section role, blind) -------------------
@@ -161,7 +215,7 @@ export class DsGroup {
   // Awaited: the store may self-encrypt (async), and a committer's own path
   // secret cannot be re-derived from the log — losing the last save would strand
   // the founder on reload. Every mutating path awaits this.
-  async _persist() { if (this.store?.save) await this.store.save({ member: this.member.exportState(), leafDir: this.leafDir, inStep: this.inStep }); }
+  async _persist() { if (this.store?.save) await this.store.save({ member: this.member.exportState(), leafDir: this.leafDir, inStep: this.inStep, signedFrom: this.signedFrom }); }
   _applyDir(dir) { if (!dir) return; if (dir.reset) this.leafDir = {}; if (dir.set) Object.assign(this.leafDir, dir.set); if (dir.del) for (const a of dir.del) delete this.leafDir[String(a).toLowerCase()]; }
 
   // ---- create a brand-new group (founder at leaf 0, epoch 1) -----------------
@@ -169,7 +223,9 @@ export class DsGroup {
     this.member = this._newMember();
     this.member.seat(0, this.rivetPriv, this.rivetPub);
     const commit = await this.member.commit({ type: 'update' });   // establishes epoch 1
+    commit.format = DS_FORMAT;
     commit.treeHash = treeHashOf(this.member);
+    this.signedFrom = 1;
     this.inStep = commit.treeHash;
     this.leafDir = { [this.address]: 0 };
     const res = await this._post({ commit, dir: { set: { [this.address]: 0 } } }, 0);
@@ -184,7 +240,8 @@ export class DsGroup {
       if (e.epoch <= epoch) continue;
       const env = await this._payload(e.epoch);
       const c = env?.commit;
-      if (c?.type === 'reinit' && String(c.founderPub || '').toLowerCase() !== String(this.rivetPub || '').toLowerCase()) return e.epoch;
+      if (c?.type === 'reinit' && String(c.founderPub || '').toLowerCase() !== String(this.rivetPub || '').toLowerCase()
+        && this._reinitAccepted(c, e.epoch, e.cred)) return e.epoch;
     }
     return null;
   }
@@ -214,6 +271,25 @@ export class DsGroup {
     // it contains commits every member already applied (the library's epoch 21
     // added over an occupied leaf), and members' keys depend on applying them.
     const judged = !!(commit.parentHash || commit.treeHash);
+    const signed = (commit.format || 0) >= 4;
+    // Downgrades: once a group carries hashes, a commit without them is not one of
+    // its commits; once it carries signatures, an unsigned one is not either.
+    const downgrade = (!judged && this.inStep) ? 'carries no tree hashes, after this group adopted them'
+      : (!signed && this.signedFrom) ? 'is unsigned, after this group adopted signed commits' : null;
+    if (downgrade) {
+      if (confirmed) return skip(downgrade);
+      throw outOfStep(`${downgrade} — and this device cannot confirm its tree against the log`);
+    }
+    if (signed) {
+      const s = this._verifiedSigner(meta.epoch, meta.cred);
+      const lf = this.member.leaves[commit.committerLeafIndex];
+      const bad = s.fault ? s.fault
+        : (!lf || lf.blank || addressOfPub(lf.pub) !== s.address) ? `is signed by ${s.address.slice(0, 10)}…, not the member at leaf ${commit.committerLeafIndex}` : null;
+      if (bad) {
+        if (confirmed || !judged) return skip(bad);
+        throw outOfStep(`${bad} — and this device cannot confirm its tree against the log`);
+      }
+    }
     const fault = judged ? this._publicFault(commit) : null;
     if (fault) {
       if (confirmed) return skip(fault);
@@ -226,6 +302,7 @@ export class DsGroup {
         const after = treeHashOf(this.member);
         if (after !== commit.treeHash) throw outOfStep(`after applying, this device's tree (${shortHash(after)}) is not the one the commit records (${shortHash(commit.treeHash)})`);
         this.inStep = after;
+        if (signed && this.signedFrom == null) this.signedFrom = meta.epoch ?? this.member.epoch;
       } else {
         this.inStep = null;   // a commit without a hash (older format): the tree is no longer confirmed
       }
@@ -290,12 +367,20 @@ export class DsGroup {
       if (env.commit?.type === 'reinit') {
         const mine = String(env.commit.founderPub || '').toLowerCase() === String(this.rivetPub || '').toLowerCase();
         if (mine && await this._adoptSaved(e.epoch)) continue;
+        if (!mine && !this._reinitAccepted(env.commit, e.epoch, e.cred)) {
+          // Not a restore this member can accept (unsigned after signing began, not
+          // signed by its founder, or a founder who never sat in this tree): it is
+          // not the group's, and this member stays in the tree it has.
+          this.member.epoch += 1;
+          this.skipped.push({ epoch: e.epoch, reason: 'a restore not signed by a member of this group', signer: e.signer || null });
+          continue;
+        }
         if (mine) { const err = new Error('this device restored the group from another instance whose saved state is not here'); err.code = 'OWN_COMMIT'; err.epLabel = `catchup@${e.epoch}(reinit) › ${err.message}`; if (tolerate) { this._stick(e.epoch, err, e.signer || null); return; } throw err; }
         this.restoredAt = e.epoch;
         return;
       }
       let outcome;
-      try { outcome = await this._applyChecked(env.commit, { epoch: e.epoch, signer: e.signer }); }
+      try { outcome = await this._applyChecked(env.commit, { epoch: e.epoch, signer: e.signer, cred: e.cred }); }
       catch (err) {
         // My own rotating commit, made by another instance of this rivet: take the
         // state that instance saved (the store is shared) instead of applying it.
@@ -327,6 +412,7 @@ export class DsGroup {
     this.member.importState(saved.member, this.rivetPriv);
     this.leafDir = saved.leafDir || {};
     this.inStep = saved.inStep || null;
+    this.signedFrom = saved.signedFrom ?? null;
     return true;
   }
 
@@ -338,6 +424,7 @@ export class DsGroup {
       this.member.importState(saved.member, this.rivetPriv);
       this.leafDir = saved.leafDir || {};
       this.inStep = saved.inStep || null;
+      this.signedFrom = saved.signedFrom ?? null;
       this.skipped = [];
       this.stuck = null;
       this.restoredAt = null;
@@ -365,6 +452,7 @@ export class DsGroup {
     this.stuck = null;
     this.restoredAt = null;
     this.inStep = null;
+    this.signedFrom = null;
     this.skipped = [];
     this.leafDir = {};   // rebuilt from the whole log below, never layered over a copy
     const full = await this._log(0);
@@ -372,7 +460,8 @@ export class DsGroup {
     const all = [];
     for (const e of full) all.push({ epoch: e.epoch, env: await this._payload(e.epoch) });
     // Only the current tree counts: everything from the latest reinit on.
-    const lastReinit = [...all].reverse().find((x) => x.env?.commit?.type === 'reinit');
+    const credOf = (ep) => full.find((l) => l.epoch === ep)?.cred || null;
+    const lastReinit = [...all].reverse().find((x) => x.env?.commit?.type === 'reinit' && this._reinitAccepted(x.env.commit, x.epoch, credOf(x.epoch)));
     const envs = lastReinit ? all.filter((x) => x.epoch >= lastReinit.epoch) : all;
     const log = full.filter((e) => envs.some((x) => x.epoch === e.epoch));
     for (const x of envs) this._applyDir(x.env?.dir);
@@ -404,6 +493,18 @@ export class DsGroup {
     // key — the non-rotating add means there is nothing to replay for my own add.
     try { await this.member.applyWelcome(addEntry.env.commit.welcome, myLeaf, this.rivetPriv); }
     catch (err) { err.epLabel = `bootstrap Welcome@${addEntry.epoch} › ${err.epLabel || err.message}`; throw err; }
+    // A signed Welcome must be signed by the member at its committer leaf in the tree
+    // it hands over — otherwise it is not the group's, whoever served it.
+    if ((addEntry.env.commit.format || 0) >= 4) {
+      const s = this._verifiedSigner(addEntry.epoch, credOf(addEntry.epoch));
+      const lf = this.member.leaves[addEntry.env.commit.committerLeafIndex];
+      if (s.fault || !lf || lf.blank || addressOfPub(lf.pub) !== s.address) {
+        const e = new Error(`the Welcome that seats this device ${s.fault || 'is not signed by the member who seated it'} — refusing it`);
+        e.code = 'FORGED_WELCOME';
+        throw e;
+      }
+      this.signedFrom = addEntry.epoch;
+    }
     if (carry) for (const [e, k] of carry) if (!this.member.keyring.has(Number(e))) this.member.keyring.set(Number(e), k);
     // The Welcome's tree is the one the add produced: confirm it against the hash
     // the add records, so this device can judge the commits that follow.
@@ -411,7 +512,7 @@ export class DsGroup {
     for (const x of envs) {
       if (x.epoch > addEntry.epoch && x.env) {
         let outcome;
-        try { outcome = await this._applyChecked(x.env.commit, { epoch: x.epoch, signer: log.find((l) => l.epoch === x.epoch)?.signer || null }); }
+        try { outcome = await this._applyChecked(x.env.commit, { epoch: x.epoch, signer: log.find((l) => l.epoch === x.epoch)?.signer || null, cred: credOf(x.epoch) }); }
         catch (err) {
           err.epLabel = `replay@${x.epoch}(${x.env.commit?.type || '?'}) › ${err.epLabel || err.message}`;
           // Stuck, not lost: keep everything up to the commit that will not apply,
@@ -452,7 +553,7 @@ export class DsGroup {
       m.epoch = base;
       m.keyring = new Map(carried);
       const upd = await m.commit({ type: 'update' });   // base+1: a fresh key, retained beside the carried ones
-      const commit = { type: 'reinit', capacity: m.capacity, committerLeafIndex: 0, founderPub: this.rivetPub, path: upd.path, treeHash: treeHashOf(m) };
+      const commit = { type: 'reinit', format: DS_FORMAT, capacity: m.capacity, committerLeafIndex: 0, founderPub: this.rivetPub, path: upd.path, treeHash: treeHashOf(m) };
       const res = await this._post({ commit, dir: { reset: true, set: { [this.address]: 0 } } }, base);
       if (res.conflict) continue;
       this.member = m;
@@ -460,6 +561,7 @@ export class DsGroup {
       this.stuck = null;
       this.restoredAt = null;
       this.inStep = commit.treeHash;
+      this.signedFrom = m.epoch;
       this.skipped = [];
       await this._persist();
       return { epoch: m.epoch, groupKey: this.groupKey() };
@@ -498,11 +600,13 @@ export class DsGroup {
       const snapshot = this.member.exportState();
       const base = this.member.epoch;
       const commit = await this.member.commit(spec);   // mutates member → base+1
+      commit.format = DS_FORMAT;
       commit.parentHash = parentHash;
       commit.treeHash = treeHashOf(this.member);
       const res = await this._post({ commit, dir: dir || {} }, base);
       if (!res.conflict) {
         this.inStep = commit.treeHash;
+        if (this.signedFrom == null) this.signedFrom = res.epoch;
         this._applyDir(dir);
         await this._persist();
         return { epoch: res.epoch, groupKey: this.groupKey() };

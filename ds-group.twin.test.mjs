@@ -16,6 +16,7 @@ globalThis.ethers = (await import('ethers')).ethers;
 import { DsGroup, DS_FORMAT } from './ds-group.mjs';
 import { Member } from './treekem.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv, ecdh } from './treekem-kdf.mjs';
+import { botSigner, credOf } from './ds-test-kit.mjs';
 
 const E = globalThis.ethers;
 let fails = 0;
@@ -47,15 +48,15 @@ const fakeFetch = async (url, opts = {}) => {
   if (opts.method === 'POST' && /\/commit$/.test(url)) {
     if (Number(opts.headers['x-ds-format']) !== DS_FORMAT) return { ok: false, status: 426, json: async () => ({}) };
     if (Number(opts.headers['x-ds-epoch']) !== ds.length) return { ok: false, status: 409, json: async () => ({ current: ds.length }) };
-    const env = dec(opts.body); push(env.commit, env.dir); await F.apply(env.commit);
+    const env = dec(opts.body); push(env.commit, env.dir); Object.assign(ds[ds.length - 1], { raw: opts.body, cred: credOf(opts.headers.authorization) }); await F.apply(env.commit);
     return { ok: true, json: async () => ({ ok: true, epoch: ds.length }) };
   }
   if (/\/log\?/.test(url)) {
     const since = Number(new URL(url).searchParams.get('since') || 0);
-    return { ok: true, json: async () => ds.filter(e => e.epoch > since).map(e => ({ epoch: e.epoch })) };
+    return { ok: true, json: async () => ds.filter(e => e.epoch > since).map(e => ({ epoch: e.epoch, cred: e.cred || null })) };
   }
   const m = url.match(/\/commit\/(\d+)/);
-  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => enc({ commit: e.commit, dir: e.dir }) } : { ok: false, status: 404 }; }
+  if (m) { const e = ds[Number(m[1]) - 1]; return e ? { ok: true, status: 200, arrayBuffer: async () => e.raw || enc({ commit: e.commit, dir: e.dir }) } : { ok: false, status: 404 }; }
   return { ok: false, status: 404 };
 };
 
@@ -65,7 +66,7 @@ const sharedStore = { load: async () => clone(stored), save: async (s) => { stor
 const twin = (store) => new DsGroup({
   relayUrl: 'https://x', contract: '0xc', session: '0xs',
   address: T.addr, rivetPriv: null, rivetPub: T.pub,
-  sign: async () => 'Bot test', leafDecap: async (e) => ecdh(T.priv, e),
+  sign: botSigner(T.priv, '0xc'), leafDecap: async (e) => ecdh(T.priv, e),
   stack, fetchImpl: fakeFetch, capacity: 8, store,
 });
 
@@ -118,7 +119,7 @@ push(await F.commit({ type: 'remove', removeLeafIndex: 12 }), { del: [R.addr] })
 const rGroup = () => new DsGroup({
   relayUrl: 'https://x', contract: '0xc', session: '0xs',
   address: R.addr, rivetPriv: null, rivetPub: R.pub,
-  sign: async () => 'Bot test', leafDecap: async (e) => ecdh(R.priv, e),
+  sign: botSigner(R.priv, '0xc'), leafDecap: async (e) => ecdh(R.priv, e),
   stack, fetchImpl: fakeFetch, capacity: 8, store: { load: async () => clone(rStored), save: async () => {} },
 });
 try { await rGroup().load(); bad('a removed device loaded its stale save as a readable group'); }
