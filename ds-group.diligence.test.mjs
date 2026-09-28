@@ -8,6 +8,7 @@
 //                    keys do not move, and the next valid commit applies normally
 //   CONFIRMED        members confirm each tree they reach against the commit's hash
 //   JOINER           a device joining from its Welcome confirms the tree it received
+//   LEGACY           history from before these rules replays exactly as it was applied
 //
 //   node client-lib/ds-group.diligence.test.mjs
 import { ethers } from 'ethers';
@@ -87,6 +88,24 @@ check(!gC2.stuck && gC2.isSeated(X.addr) && (await sealedKeys(gC2, cipher).open(
 stores.delete(X.addr);
 const gX = groupFor(X); await gX.load();
 check(!gX.stuck && gX.inStep && (await sealedKeys(gX, cipher).open(before)).ok, 'a newcomer after the skipped commits bootstraps confirmed, with the history');
+
+// LEGACY: history from before format 3 carries no hashes and is replayed as it was
+// applied — even a commit the new rules would reject (an add over an occupied leaf,
+// which the library's log really contains at epoch 21). Judging it now would strand
+// every device that replays that history.
+{
+  ds.length = 0; signers.length = 0; stores.clear();
+  const L = kp(), M = kp(), N = kp();
+  const gL = groupFor(L); await gL.create();
+  await gL.addMember(M.addr, M.pub);
+  for (const e of ds) { delete e.commit.parentHash; delete e.commit.treeHash; }   // strip to the old format
+  // An old-format add over M's occupied leaf, as the old code could post (non-rotating).
+  const mLeaf = Number(gL.leafDir[M.addr]);
+  ds.push({ commit: { type: 'add', committerLeafIndex: 0, capacity: 8, addLeafIndex: mLeaf, addPub: N.pub, path: [], welcome: null }, dir: { set: { [N.addr]: mLeaf } } }); signers.push(L.addr);
+  stores.clear();   // M replays the whole log from its Welcome, as a device with no saved state does
+  const gM = groupFor(M); await gM.load();
+  check(!gM.stuck && gM.epoch() === ds.length, 'LEGACY: a device replaying old-format history applies a commit the new rules would reject, as it always did — not stuck');
+}
 
 console.log('\n' + (failures ? `DILIGENCE FAIL — ${failures}` : 'DILIGENCE PASS — invalid commits are refused at the source or skipped by everyone alike.'));
 process.exit(failures ? 1 : 0);

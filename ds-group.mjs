@@ -209,7 +209,12 @@ export class DsGroup {
       if (confirmed) return skip(`built on a tree other than the log's (${shortHash(commit.parentHash)} ≠ ${shortHash(mine)})`);
       throw outOfStep(`this device's tree (${shortHash(mine)}) is not the one this commit was built on (${shortHash(commit.parentHash)}), and it cannot confirm which is the log's`);
     }
-    const fault = this._publicFault(commit);
+    // Only commits written under these rules (format 3: they carry tree hashes) are
+    // judged by them. History from before is replayed exactly as it always was —
+    // it contains commits every member already applied (the library's epoch 21
+    // added over an occupied leaf), and members' keys depend on applying them.
+    const judged = !!(commit.parentHash || commit.treeHash);
+    const fault = judged ? this._publicFault(commit) : null;
     if (fault) {
       if (confirmed) return skip(fault);
       throw outOfStep(`${fault} — and this device cannot confirm its tree against the log`);
