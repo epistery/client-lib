@@ -8,17 +8,14 @@
 //   SEATED BY A NON-WRITER   → refused (FORGED_WELCOME), holds nothing
 //   AFTER A RESTORE          → the same rule, through the Welcome; members unaffected
 //   CHAIN UNREACHABLE        → refused (CHAIN_UNREACHABLE), never guessed; joins once it answers
-//   first endpoint dead      → the next endpoint answers
 //
-// The chain here is a fake JSON-RPC node that decodes real calldata, so chainReader's
-// encoding is exercised too.
+// The chain here is a fake attestation reader; the real one is epistery core's.
 //
 //   node client-lib/ds-group.chain.test.mjs
 import { ethers } from 'ethers';
 globalThis.ethers = ethers; globalThis.window ??= globalThis;
 import { DsGroup } from './ds-group.mjs';
 import { cryptoStack, privFromSecret, pubFromPriv } from './treekem-kdf.mjs';
-import { chainReader } from './chain-read.mjs';
 import { sealedKeys } from './sealed.mjs';
 import * as cipher from './cipher.mjs';
 import { botSigner, credOf } from './ds-test-kit.mjs';
@@ -29,27 +26,18 @@ const kp = () => { const b = new Uint8Array(32); crypto.getRandomValues(b); cons
 const CONTRACT = ethers.Wallet.createRandom().address.toLowerCase();
 const SESSION = 'recipes';
 
-// ---- the chain: a fake RPC node answering eth_call from calldata ----
+// ---- the chain: what an attestation reader (epistery chainReader) answers ----
+// The reader itself — owned endpoints, failover, the read-failure classifier — is
+// tested in epistery core (test/chain-read.test.ts). Here: the rule DsGroup applies.
 const onChain = { rivets: new Set(), writers: new Set() };
 let chainUp = true;
-const iface = new ethers.utils.Interface([
-  'function isAuthorized(address) view returns (bool)',
-  'function getRivets() view returns (address[])',
-  'function roleOf(string section, address account) view returns (uint8)',
-]);
-const rpcFetch = async (url, opts) => {
-  if (url.includes('dead') || !chainUp) throw new Error('connect ECONNREFUSED');
-  const { params: [{ to, data }] } = JSON.parse(opts.body);
-  const tx = iface.parseTransaction({ data });
-  let result;
-  if (to.toLowerCase() !== CONTRACT) result = iface.encodeFunctionResult(tx.name, tx.name === 'getRivets' ? [[]] : tx.name === 'roleOf' ? [0] : [false]);
-  else if (tx.name === 'isAuthorized') result = iface.encodeFunctionResult('isAuthorized', [onChain.rivets.has(tx.args[0].toLowerCase())]);
-  else if (tx.name === 'getRivets') result = iface.encodeFunctionResult('getRivets', [[]]);
-  else result = iface.encodeFunctionResult('roleOf', [tx.args[0] === SESSION && onChain.writers.has(tx.args[1].toLowerCase()) ? 2 : 0]);
-  return { ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result }) };
-};
-// A fresh reader per device (the reader caches answers, as a browser tab would).
-const chain = () => chainReader({ rpcs: ['https://dead.example/', 'https://node.example/'], fetchImpl: rpcFetch });
+const answer = (v) => { if (!chainUp) { const e = new Error('no attestation endpoint answered'); e.code = 'CHAIN_UNREACHABLE'; throw e; } return v; };
+const chain = () => ({
+  isRivet: async (c, a) => answer(onChain.rivets.has(a.toLowerCase())),
+  roleOf: async (c, s, a) => answer(onChain.writers.has(a.toLowerCase()) ? 2 : 0),
+  mayCommit: async (c, s, a) => answer(onChain.rivets.has(a.toLowerCase()) || (s === SESSION && onChain.writers.has(a.toLowerCase()))),
+  endpoints: ['owned-node'],
+});
 
 // ---- the relay: a plain log ----
 const log = [];
@@ -105,9 +93,6 @@ check(!r.ok && r.code === 'CHAIN_UNREACHABLE' && !r.g.groupKey(), `chain unreach
 chainUp = true;
 r = await joins(C4);
 check(r.ok, 'chain back → the same device joins');
-
-// first endpoint dead: every read above went through the second one
-check(chain().endpoints.length === 2, 'the dead first endpoint is skipped for the next (every join above)');
 
 // A RESTORE changes nothing about the rule: the fresh device follows it through the
 // Welcome that seats it, judged the same way. Members already in the group keep loading.

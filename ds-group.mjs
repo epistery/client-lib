@@ -104,11 +104,11 @@ export class DsGroup {
     // computeSharedSecret — (ephemeralEncHex) => Promise<Uint8Array shared>.
     // Null for server participants (extractable derived keys use rivetPriv).
     this.leafDecap = opts.leafDecap || null;
-    // chain: a chain reader (chain-read.mjs) the CLIENT uses itself — straight to
-    // the RPC endpoints, never through the relay. With it, a device joining from
+    // chain: an attestation chain reader (epistery core's chainReader — owned nodes
+    // only) the CLIENT uses itself, never through the relay. With it, a device joining from
     // scratch confirms on chain that whoever seated it may commit to this session,
     // and that the founder of any restore it follows is an owner rivet.
-    if (!opts.chain?.mayCommit) throw new Error('DsGroup: a chain reader is required (chain-read.mjs) — a group is joined on the chain\'s word, never a server\'s');
+    if (!opts.chain?.mayCommit) throw new Error('DsGroup: a chain reader is required (epistery chainReader) — a group is joined on the chain\'s word, never a server\'s');
     this.chain = opts.chain;
     this.member = null;
     this.leafDir = {};   // addressLower -> leafIndex (public directory)
@@ -208,9 +208,9 @@ export class DsGroup {
   async _onChain(read) {
     try { return await read(); }
     catch (err) {
-      if (err.code !== 'CHAIN_UNREACHABLE') throw err;
+      if (err.code !== 'CHAIN_UNREACHABLE' && err.code !== 'CHAIN_DISAGREES') throw err;
       const e = new Error(`could not confirm this group against the chain (${err.message}) — try again`);
-      e.code = 'CHAIN_UNREACHABLE';
+      e.code = err.code;
       throw e;
     }
   }
