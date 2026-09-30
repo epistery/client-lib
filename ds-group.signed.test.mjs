@@ -54,7 +54,7 @@ const relayPosts = async (env, { signWith = null, cred, mutate } = {}) => {
 };
 
 console.log('\n[signed] members check who signed each commit');
-check(DS_FORMAT === 4, 'commit format 4');
+check(DS_FORMAT === 5, 'commit format 5');
 const A = kp(), B = kp(), R = kp();   // A owner device, B member, R the relay's own key
 const gA = groupFor(A); await gA.create();
 await gA.addMember(B.addr, B.pub);

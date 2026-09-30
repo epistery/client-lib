@@ -23,6 +23,17 @@
 
 import { Member } from './treekem.mjs';
 import { cryptoStack } from './treekem-kdf.mjs';
+//
+// 5 = commit AUTHORITY is the member's to check, not only the relay's (Epoch,
+// decision 2 of the 3Q26 refactor): a commit that rotates the key — a remove, an
+// update, a restore, or an add that grows the tree — must come from an owner
+// device or a section admin, and every member confirms that on chain, through the
+// attestation reader it already holds, before applying it. The relay's DS gate
+// keeps refusing such commits too, as a backstop. A commit the chain says its
+// signer may not make leaves the member STUCK before it (an owner restores);
+// a chain that does not answer HOLDS the member with a retryable error — never a
+// skip, since a skip is permanent and would fork the member. Only commits written
+// under this format are judged by it.
 
 // The commit format this client writes, sent with every commit. 2 = growth-aware:
 // commits and saved state carry the tree's capacity, and an add never seats an
@@ -48,7 +59,13 @@ import { cryptoStack } from './treekem-kdf.mjs';
 // nothing to a group: it cannot sign as a member. The format is stated inside the
 // commit, and after a member has seen a format-4 commit an older one is a
 // downgrade: invalid, so credentials cannot be stripped to slip a commit past.
-export const DS_FORMAT = 4;
+export const DS_FORMAT = 5;
+
+// Whether a commit rotates the group key: anything but a non-growing add. The
+// relay applies the same rule to the raw envelope (ds.mjs rotates()).
+export function rotates(commit) {
+  return !commit || commit.type !== 'add' || commit.grow === true;
+}
 
 // The size a NEW group's tree starts at. Not a ceiling: a full tree doubles when
 // the next member is seated (treekem growTree), so a group grows with its
@@ -108,7 +125,7 @@ export class DsGroup {
     // only) the CLIENT uses itself, never through the relay. With it, a device joining from
     // scratch confirms on chain that whoever seated it may commit to this session,
     // and that the founder of any restore it follows is an owner rivet.
-    if (!opts.chain?.mayCommit) throw new Error('DsGroup: a chain reader is required (epistery chainReader) — a group is joined on the chain\'s word, never a server\'s');
+    if (!opts.chain?.mayCommit || !opts.chain?.mayRotate || !opts.chain?.isRivet) throw new Error('DsGroup: a chain reader is required (epistery chainReader, with mayCommit, mayRotate and isRivet) — a group is joined on the chain\'s word, never a server\'s');
     this.chain = opts.chain;
     this.member = null;
     this.leafDir = {};   // addressLower -> leafIndex (public directory)
@@ -332,6 +349,18 @@ export class DsGroup {
       if (confirmed) return skip(fault);
       throw outOfStep(`${fault} — and this device cannot confirm its tree against the log`);
     }
+    // Format 5: a rotating commit must come from an owner device or a section
+    // admin, and the chain says so — read by this member, held on no answer.
+    if ((commit.format || 0) >= 5 && rotates(commit)) {
+      const s = this._verifiedSigner(meta.epoch, meta.cred);
+      if (s.fault) return skip(s.fault);
+      const may = await this._onChain(() => this.chain.mayRotate(this.contract, this.session, s.address, s.identity));
+      if (!may) {
+        const e = new Error(`rotates the key but was signed by ${s.address.slice(0, 10)}…, who is neither an owner device nor an admin of this session on chain`);
+        e.code = 'UNAUTHORIZED_COMMIT';
+        throw e;
+      }
+    }
     const before = this.member.exportState();
     try {
       await this.member.apply(commit);
@@ -412,6 +441,13 @@ export class DsGroup {
           this.skipped.push({ epoch: e.epoch, reason: 'a restore not signed by a member of this group', signer: e.signer || null });
           continue;
         }
+        // Format 5: a restore is founded by an owner device, and the chain says so.
+        if (!mine && (env.commit.format || 0) >= 5
+          && !(await this._onChain(() => this.chain.isRivet(this.contract, addressOfPub(env.commit.founderPub))))) {
+          this.member.epoch += 1;
+          this.skipped.push({ epoch: e.epoch, reason: 'a restore not founded by an owner device (on chain)', signer: e.signer || null });
+          continue;
+        }
         if (mine) { const err = new Error('this device restored the group from another instance whose saved state is not here'); err.code = 'OWN_COMMIT'; err.epLabel = `catchup@${e.epoch}(reinit) › ${err.message}`; if (tolerate) { this._stick(e.epoch, err, e.signer || null); return; } throw err; }
         this.restoredAt = e.epoch;
         return;
@@ -423,6 +459,9 @@ export class DsGroup {
         // state that instance saved (the store is shared) instead of applying it.
         if (err.code === 'OWN_COMMIT' && await this._adoptSaved(e.epoch)) continue;
         err.epLabel = `catchup@${e.epoch}(${env.commit?.type || '?'}) › ${err.epLabel || err.message}`;
+        // A chain that did not answer is not a verdict on the commit: hold (the
+        // caller retries; saved state is untouched), never stick and never skip.
+        if (err.code === 'CHAIN_UNREACHABLE' || err.code === 'CHAIN_DISAGREES') throw err;
         if (tolerate && err.code !== 'NO_SEAT') {
           // A commit that will not apply may already have been answered: an owner
           // restored the group past it. Then this member joins the new tree rather

@@ -26,4 +26,4 @@ export const credOf = (authorization) => (typeof authorization === 'string' && a
 
 // A chain on which everyone may commit — for tests about something other than the
 // chain. What a fresh device asks the chain is tested in ds-group.chain.test.mjs.
-export const anyoneMayCommit = { isRivet: async () => true, roleOf: async () => 3, mayCommit: async () => true, endpoints: [] };
+export const anyoneMayCommit = { isRivet: async () => true, roleOf: async () => 3, mayCommit: async () => true, mayRotate: async () => true, endpoints: [] };

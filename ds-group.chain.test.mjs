@@ -27,15 +27,16 @@ const CONTRACT = ethers.Wallet.createRandom().address.toLowerCase();
 const SESSION = 'recipes';
 
 // ---- the chain: what an attestation reader (epistery chainReader) answers ----
-// The reader itself — owned endpoints, failover, the read-failure classifier — is
+// The reader itself — owned endpoints, the k-of-n quorum, the read-failure classifier — is
 // tested in epistery core (test/chain-read.test.ts). Here: the rule DsGroup applies.
-const onChain = { rivets: new Set(), writers: new Set() };
+const onChain = { rivets: new Set(), writers: new Set(), admins: new Set() };
 let chainUp = true;
 const answer = (v) => { if (!chainUp) { const e = new Error('no attestation endpoint answered'); e.code = 'CHAIN_UNREACHABLE'; throw e; } return v; };
 const chain = () => ({
   isRivet: async (c, a) => answer(onChain.rivets.has(a.toLowerCase())),
-  roleOf: async (c, s, a) => answer(onChain.writers.has(a.toLowerCase()) ? 2 : 0),
-  mayCommit: async (c, s, a) => answer(onChain.rivets.has(a.toLowerCase()) || (s === SESSION && onChain.writers.has(a.toLowerCase()))),
+  roleOf: async (c, s, a) => answer(onChain.admins.has(a.toLowerCase()) ? 3 : onChain.writers.has(a.toLowerCase()) ? 2 : 0),
+  mayCommit: async (c, s, a) => answer(onChain.rivets.has(a.toLowerCase()) || (s === SESSION && (onChain.writers.has(a.toLowerCase()) || onChain.admins.has(a.toLowerCase())))),
+  mayRotate: async (c, s, a) => answer(onChain.rivets.has(a.toLowerCase()) || (s === SESSION && onChain.admins.has(a.toLowerCase()))),
   endpoints: ['owned-node'],
 });
 
@@ -110,3 +111,43 @@ check(refused, 'a group without a chain reader refuses to exist');
 
 console.log('\n' + (failures ? `CHAIN FAIL — ${failures}` : 'CHAIN PASS — a fresh device takes its seat only from someone the chain lets commit, and never on a guess.'));
 process.exit(failures ? 1 : 0);
+
+
+// ---- format 5: a rotating commit is the member's to confirm on chain ----------
+// The fake relay above gates nothing, so a writer's remove LANDS in the log — as
+// it would if the relay's backstop were bypassed. Every member then reads the
+// chain for itself.
+console.log('\n[chain] a rotating commit must come from an owner device or a section admin');
+chainUp = true;
+{
+  const P = kp(), Q = kp();   // P a section writer, Q an admin
+  onChain.writers.add(P.addr); onChain.admins.add(Q.addr);
+  await gA.load(); await gA.addMember(P.addr, P.pub); await gA.addMember(Q.addr, Q.pub);
+  const gP = groupFor(P); await gP.load();
+  const gQ = groupFor(Q); await gQ.load();
+  const victim = kp(); await gA.load(); await gA.addMember(victim.addr, victim.pub);
+  // the writer removes the victim: the relay (here) lets it through
+  await gP.load(); await gP.removeMember(victim.addr).catch(() => {});
+  const epochOfRemove = log.length;
+  // an in-step member replays it and is STUCK before it, naming the cause
+  await gA.load();
+  check(gA.stuck && gA.stuck.epoch === epochOfRemove && gA.stuck.code === 'UNAUTHORIZED_COMMIT', `a writer's remove leaves an owner device stuck before it, UNAUTHORIZED_COMMIT (${gA.stuck?.reason})`);
+  // the chain not answering HOLDS: load throws CHAIN_UNREACHABLE, saved state untouched, and clears once it answers
+  const before = JSON.stringify(await storeFor(Q).load());
+  chainUp = false;
+  let held = null;
+  try { await gQ.load(); } catch (e) { held = e.code; }
+  check(held === 'CHAIN_UNREACHABLE' && JSON.stringify(await storeFor(Q).load()) === before, 'a chain that does not answer holds the member (CHAIN_UNREACHABLE), saved state untouched — never a skip');
+  chainUp = true;
+  await gQ.load();
+  check(gQ.stuck && gQ.stuck.code === 'UNAUTHORIZED_COMMIT', 'once the chain answers, the same verdict: stuck before the unauthorized commit');
+  // an admin's own rotation is accepted by everyone
+  await gA.load(); const restorer = gA;
+  check(!!restorer.stuck, 'precondition: the owner device is stuck');
+  await restorer.reinit();
+  await gQ.load();
+  const gone = kp(); await gQ.addMember(gone.addr, gone.pub);
+  await gQ.removeMember(gone.addr);
+  await gA.load();
+  check(!gA.stuck && gA.member.epoch === log.length, 'after the owner restores, an admin\'s remove applies for everyone');
+}

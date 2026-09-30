@@ -49,7 +49,7 @@ const groupFor = (k) => new DsGroup({ chain: anyoneMayCommit, relayUrl: 'https:/
   sign: async (...a) => { postingAs = k.addr; return botSigner(k.priv, '0xo')(...a); }, stack, fetchImpl: fakeFetch, capacity: 8, store: storeFor(k) });
 
 console.log('\n[diligence] every commit states its tree');
-check(DS_FORMAT === 4, 'commit format 4');
+check(DS_FORMAT === 5, 'commit format 5');
 const A = kp(), B = kp(), C = kp(), X = kp();
 const gA = groupFor(A); await gA.create();
 await gA.addMember(B.addr, B.pub); await gA.addMember(C.addr, C.pub);
