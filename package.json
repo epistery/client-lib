@@ -1,7 +1,7 @@
 {
   "name": "@epistery/client-lib",
-  "version": "1.3.0",
-  "description": "Shared browser modules for epistery plugin UIs \u2014 cipher (the browser twin of @epistery/sessions bot-identity), the MarkUp wiki renderer, and pure WikiWord extraction. The shell serves these at /lib/*; plugin client bundles import them by that URL.",
+  "version": "1.4.0",
+  "description": "Shared browser modules for epistery plugin UIs — cipher (the browser twin of @epistery/sessions bot-identity), the MarkUp wiki renderer, and pure WikiWord extraction. The shell serves these at /lib/*; plugin client bundles import them by that URL.",
   "type": "module",
   "main": "wikiwords.mjs",
   "exports": {
