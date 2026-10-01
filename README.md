@@ -6,6 +6,7 @@ need by URL, plus one util the wiki plugin also uses server-side. Extracted from
 
 | module | environment | purpose |
 |---|---|---|
+| `records.mjs` | browser + Node | the record shapes every kind shares: `listRecords` (list, match, read, drop tombstones), `tombstone`, `stamp`, `newId`, `nextNumbered`, `isSealed` |
 | `cipher.mjs` | browser + Node | per-session content + key wraps, over epistery core's one construction (`epistery/client/peer-cipher.mjs`); the server's `serverKeys` uses this same module |
 | `markup.mjs` | browser only | `MarkUp` — wiki markdown renderer (marked + Mermaid from CDN), WikiWord auto-linking |
 | `wikiwords.mjs` | **browser + Node** | pure WikiWord/reference extraction — served to the browser *and* imported by the wiki plugin's server code |
