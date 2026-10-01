@@ -94,7 +94,6 @@ function decodeCred(b64url) {
   return JSON.parse(new TextDecoder().decode(u));
 }
 const decBytes = (buf) => JSON.parse(new TextDecoder().decode(new Uint8Array(buf)));
-const fromB64 = (b64) => { const s = atob(b64); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
 
 export class DsGroup {
   // opts:
@@ -544,8 +543,8 @@ export class DsGroup {
     const myLeaf = this.leafDir[this.address];
     if (myLeaf == null) {
       // Not seated yet. If the chain recognizes this rivet as a member (e.g. a
-      // public-read follower), it is entitled to a seat — the caller turns this
-      // into a seat request (requestSeat) and waits for a present key-holder to
+      // public-read follower), it is entitled to a seat — the caller sends the
+      // courier key-request (session-keys.mjs) and waits for a present key-holder to
       // admit it. Typed so openGroup can branch instead of dead-ending.
       const e = new Error('this rivet holds no leaf in the group yet — request a seat');
       e.code = 'NO_SEAT';
@@ -795,65 +794,20 @@ export class DsGroup {
   // Self-update (post-compromise healing): rotate this member's own path.
   async update() { return this._commitWithRebase({ spec: { type: 'update' }, dir: {} }); }
 
-  // ---- seat requests: public-read admission via the proposals mailbox --------
-  // Membership is the chain's (roleOf); key-delivery is ours. A member with no
-  // leaf ASKS for a seat by posting a proposal carrying its rivet pubkey. The
-  // relay authorizes the ask at roleOf>=read (a read member is entitled to its
-  // key). `by` (the recovered signer) is the authoritative asker; the blob
-  // carries the pubkey a committer needs to seat a leaf. No special "reader"
-  // path — the asker becomes a normal leaf; roleOf still gates its writes.
-  async requestSeat() {
-    const body = encBytes({ address: this.address, pub: this.rivetPub });
-    const auth = await this.sign('POST', `${this.session}/_ds/proposal`, body);
-    const r = await this.fetch(this._u('/proposals'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/octet-stream', authorization: auth },
-      body,
-    });
-    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || `seat request → ${r.status}`); }
-    return r.json();   // { id }
-  }
-
-  async listSeatRequests() {
-    const r = await this.fetch(this._u('/proposals'));
-    if (!r.ok) return [];
-    const rows = await r.json();
-    return (rows || []).map((row) => {
-      let p = {};
-      try { p = decBytes(fromB64(row.blob)); } catch { /* opaque / not a seat request */ }
-      return { id: row.id, address: (row.by || p.address || '').toLowerCase(), pub: p.pub, ts: row.ts };
-    }).filter((q) => q.address && q.pub);
-  }
-
-  // A present key-holder drains seat requests: for each asker the chain still
-  // recognizes as a member (isMember(address), the caller's on-chain roleOf
-  // check), seat it (Add commit + Welcome) and consume the request. Returns the
-  // count newly seated. Best-effort per request — an epoch conflict leaves it
-  // pending for the next drain.
-  async drainSeatRequests(isMember) {
-    if (!this.member) throw new Error('group not loaded');
-    const reqs = await this.listSeatRequests();
-    const done = [];
-    for (const q of reqs) {
-      if (this.isSeated(q.address)) { done.push(q.id); continue; }   // already holds its leaf
-      if (isMember && !(await isMember(q.address))) continue;               // not a member per the chain
-      try { await this.addMember(q.address, q.pub); done.push(q.id); }
-      catch { /* epoch conflict — retry next drain */ }
+  // The group's roster: every address the directory names that actually holds
+  // its leaf (the leaf's key derives to the address), with that key — what a
+  // restore re-seats and what a key-delivery policy reads instead of walking the
+  // tree itself.
+  seatedMembers() {
+    const out = [];
+    for (const [address, leaf] of Object.entries(this.leafDir)) {
+      const a = String(address).toLowerCase();
+      if (!this._holds(a, leaf)) continue;
+      const lf = this.member.leaves[Number(leaf)];
+      const pub = String(lf.pub).startsWith('0x') ? lf.pub : '0x' + lf.pub;
+      out.push({ address: a, publicKey: pub, leaf: Number(leaf) });
     }
-    if (done.length) { try { await this._consumeSeatRequests(done); } catch { /* best-effort */ } }
-    return done.length;
+    return out;
   }
 
-  async _consumeSeatRequests(ids) {
-    const epoch = this.member.epoch;
-    const str = JSON.stringify({ ids, epoch });   // must match the relay's re-stringify order {ids, epoch}
-    const auth = await this.sign('POST', `${this.session}/_ds/consume`, new TextEncoder().encode(str));
-    const r = await this.fetch(this._u('/proposals/consume'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: auth },
-      body: str,
-    });
-    if (!r.ok) throw new Error(`consume → ${r.status}`);
-    return r.json();
-  }
 }

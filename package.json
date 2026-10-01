@@ -1,7 +1,7 @@
 {
   "name": "@epistery/client-lib",
   "version": "1.4.1",
-  "description": "Shared browser modules for epistery plugin UIs — cipher (the browser twin of @epistery/sessions bot-identity), the MarkUp wiki renderer, and pure WikiWord extraction. The shell serves these at /lib/*; plugin client bundles import them by that URL.",
+  "description": "Shared modules for epistery, browser and Node \u2014 the TreeKEM group over the relay's delivery service (ds-group, treekem, sealed), the one relay client, key-delivery policy (session-keys, owner-seats), the signed manifests (domain, session), record helpers, the MarkUp renderer and WikiWord extraction. The console serves these at /lib/*.",
   "type": "module",
   "main": "wikiwords.mjs",
   "exports": {
@@ -19,6 +19,10 @@
     "./ds-group": "./ds-group.mjs",
     "./sealed": "./sealed.mjs",
     "./records": "./records.mjs",
+    "./manifest": "./manifest.mjs",
+    "./relay": "./relay.mjs",
+    "./session-keys": "./session-keys.mjs",
+    "./owner-seats": "./owner-seats.mjs",
     "./adslot": "./adslot.mjs",
     "./components/*": "./components/*",
     "./package.json": "./package.json"
@@ -38,6 +42,10 @@
     "ds-group.mjs",
     "sealed.mjs",
     "records.mjs",
+    "manifest.mjs",
+    "relay.mjs",
+    "session-keys.mjs",
+    "owner-seats.mjs",
     "adslot.mjs",
     "components/",
     "README.md"
