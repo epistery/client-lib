@@ -1,7 +1,7 @@
 {
   "name": "@epistery/client-lib",
   "version": "1.6.0",
-  "description": "Shared modules for epistery, browser and Node — the TreeKEM group over the relay's delivery service (ds-group, treekem, sealed), the one relay client, key-delivery policy (session-keys, owner-seats), the signed manifests (domain, session), record helpers, the MarkUp renderer and WikiWord extraction. The console serves these at /lib/*.",
+  "description": "Shared modules for epistery, browser and Node \u2014 the TreeKEM group over the relay's delivery service (ds-group, treekem, sealed), the one relay client, key-delivery policy (session-keys, owner-seats), the signed manifests (domain, session), record helpers, the MarkUp renderer and WikiWord extraction. The console serves these at /lib/*.",
   "type": "module",
   "main": "wikiwords.mjs",
   "exports": {
@@ -48,7 +48,8 @@
     "owner-seats.mjs",
     "adslot.mjs",
     "components/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "repository": {
     "type": "git",
@@ -61,5 +62,9 @@
   },
   "scripts": {
     "test": "set -e; for f in *.test.mjs; do node \"$f\"; done"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://epistery.com"
 }
