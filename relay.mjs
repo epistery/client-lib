@@ -80,7 +80,11 @@ export function relayClient(opts = {}) {
     return s;
   };
 
-  // One bounded fetch with transient retry; a response is returned as is.
+  // One bounded fetch with transient retry; a response is returned as is. `init`
+  // may be a FUNCTION producing the request per attempt: a signed write is
+  // re-signed on every retry, because the relay honours a credential once and a
+  // retry that reused the first attempt's signature would be refused as a replay
+  // whenever the first attempt had in fact been processed.
   async function send(path, init = {}, { tries = 5, baseDelayMs = 250, maxDelayMs = 2000 } = {}) {
     const url = `${baseUrl}${path}`;
     let lastErr;
@@ -88,7 +92,8 @@ export function relayClient(opts = {}) {
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);
       try {
-        return await fetchImpl(url, { ...init, headers: { ...(await headers()), ...(init.headers || {}) }, signal: abort.signal });
+        const i = typeof init === 'function' ? await init() : init;
+        return await fetchImpl(url, { ...i, headers: { ...(await headers()), ...(i.headers || {}) }, signal: abort.signal });
       } catch (err) {
         lastErr = err;
         if (!isTransient(err) || attempt === tries - 1) throw errors.fromTransport(path, err);
@@ -129,17 +134,15 @@ export function relayClient(opts = {}) {
     async storagePut(contract, path, value) {
       const body = toBytes(JSON.stringify(value));
       const folder = checksum(contract);
-      const { authorization } = await credential('PUT', folder, path, body);
       const p = `/storage/${folder}/${path}`;
-      const r = await send(p, { method: 'PUT', headers: { 'content-type': 'application/json', authorization }, body });
+      const r = await send(p, async () => ({ method: 'PUT', headers: { 'content-type': 'application/json', authorization: (await credential('PUT', folder, path, body)).authorization }, body }));
       if (!r.ok) throw await failed(p, r);
       return r.json();
     },
     async storageDelete(contract, path) {
       const folder = checksum(contract);
-      const { authorization } = await credential('DELETE', folder, path, null);
       const p = `/storage/${folder}/${path}`;
-      const r = await send(p, { method: 'DELETE', headers: { authorization } });
+      const r = await send(p, async () => ({ method: 'DELETE', headers: { authorization: (await credential('DELETE', folder, path, null)).authorization } }));
       if (r.status === 404) return { ok: true, deleted: false };
       if (!r.ok) throw await failed(p, r);
       return r.json();
@@ -159,15 +162,26 @@ export function relayClient(opts = {}) {
       if (!r.ok) throw await failed(p, r);
       return (await r.json()).items || [];
     },
-    // Upload ALREADY-sealed bytes, rooted at `contract`. No auth: the relay stores
-    // opaque bytes; what makes the upload count is the signed record that
-    // references it. An upload is kept until something deletes it. → { url, id }
-    async uploadBlob(contract, bytesOrBlob) {
-      const fd = new FormData();
-      const blob = typeof Blob !== 'undefined' && bytesOrBlob instanceof Blob ? bytesOrBlob : new Blob([bytesOrBlob], { type: 'application/octet-stream' });
-      fd.append('file', blob, 'blob.bin');
-      fd.append('contract', contract);
-      const r = await send('/upload', { method: 'POST', body: fd });
+    // Upload ALREADY-sealed bytes, rooted at `contract` and signed as a member of
+    // `session`: the same credential a storage write carries, over the bytes
+    // themselves (subpath `<session>/_upload`), so only a member seated to write
+    // in that session may fill its owner's store. The relay keeps opaque bytes;
+    // what makes the upload count is the signed record that references it, and
+    // the relay reclaims an upload no record references. → { url, id }
+    async uploadBlob(contract, bytesOrBlob, { session } = {}) {
+      if (!session) throw new Error('uploadBlob: the session the bytes belong to is required');
+      const folder = checksum(contract);
+      const isBlob = typeof Blob !== 'undefined' && bytesOrBlob instanceof Blob;
+      const bytes = new Uint8Array(isBlob ? await bytesOrBlob.arrayBuffer() : bytesOrBlob);
+      const blob = isBlob ? bytesOrBlob : new Blob([bytes], { type: 'application/octet-stream' });
+      const r = await send('/upload', async () => {
+        const fd = new FormData();
+        fd.append('file', blob, 'blob.bin');
+        fd.append('contract', folder);
+        fd.append('session', session);
+        const { authorization } = await credential('POST', folder, `${session}/_upload`, bytes);
+        return { method: 'POST', headers: { authorization }, body: fd };
+      });
       if (!r.ok) throw await failed('/upload', r);
       return r.json();
     },
@@ -180,9 +194,8 @@ export function relayClient(opts = {}) {
       const body = toBytes(payload);
       const id = randomHex(16);   // sender-minted envelope id (32 hex)
       const dest = checksum(to);
-      const { credential: cred } = await credential('POST', dest, `_inbox/${id}`, body);
       const p = `/inbox/${dest}`;
-      const r = await send(p, { method: 'POST', headers: { 'content-type': 'application/octet-stream', authorization: `Inbox ${cred}`, 'x-inbox-id': id }, body });
+      const r = await send(p, async () => ({ method: 'POST', headers: { 'content-type': 'application/octet-stream', authorization: `Inbox ${(await credential('POST', dest, `_inbox/${id}`, body)).credential}`, 'x-inbox-id': id }, body }));
       if (!r.ok) throw await failed(p, r);
       return r.json();   // { id }
     },
