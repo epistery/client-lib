@@ -118,3 +118,37 @@ export function sealedKeys(group, crypto) {
     },
   };
 }
+
+/**
+ * Open a stored value in place — the read side of the boundary, one copy for the
+ * host's dispatcher and for a device that opens what the host returned.
+ *
+ * Two sealed shapes exist in stored records: a sealed object as a field VALUE
+ * (a files entry's notes) is replaced by the opened string; sealed fields INLINE
+ * on a record (a post, a wiki doc) are stripped and the plaintext lands in
+ * `contentField`. Encrypted blob attachments (a url + iv, no ciphertext) pass
+ * through untouched. A nested seal without its own tag opens under the nearest
+ * enclosing record's `epoch`; a seal with no tag at any level is reported as
+ * untagged, never opened with a guessed key. A value that does not open becomes
+ * a STRUCTURED marker ({ unreadable, message }), never a plausible string a
+ * reader could seal back over the only copy of the record.
+ */
+export async function openDeep(keys, value, contentField = 'text', inherited = undefined) {
+  if (Array.isArray(value)) return Promise.all(value.map((v) => openDeep(keys, v, contentField, inherited)));
+  if (!value || typeof value !== 'object') return value;
+  const epoch = value.epoch ?? inherited;
+  if (isSealed(value)) {
+    const rest = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (k === 'iv' || k === 'ciphertext' || k === 'epoch') continue;   // the tag selects the key; it is not content
+      rest[k] = await openDeep(keys, v, contentField, epoch);
+    }
+    const r = await keys.open(value, { parentEpoch: inherited });
+    const content = r.ok ? r.text : { unreadable: r.cause, message: r.message };
+    if (!Object.keys(rest).length) return content;       // a pure sealed value
+    return { ...rest, [contentField]: content };         // an inline sealed record
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = await openDeep(keys, v, contentField, epoch);
+  return out;
+}
