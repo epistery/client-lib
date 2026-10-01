@@ -1,105 +1,51 @@
-// Per-session content encryption (browser-side).
-//
-// The browser twin of @epistery/sessions `bot-identity` (the server side):
-// both mirror the epistery RivetWallet peer-encryption primitive (ECDH
-// secp256k1 → SHA-256 → AES-256-GCM) for wraps, and AES-256-GCM with the
-// ciphertext‖tag concatenated into one `ciphertext` field for content. Keep the
-// two in lockstep — a wrap or a post written by a browser must unwrap/decrypt on
-// the server (MCP boundary, steward handout) and vice versa.
+// Per-session content and key wraps — the client-lib entry over epistery core's
+// one construction (epistery/client/peer-cipher.mjs). Nothing is implemented
+// here: a wrap is ECDH → SHA-256 → AES-256-GCM and sealed content is AES-256-GCM
+// under K, defined once in core, and this module names them for the session
+// layer in both environments (the browser page and a Node participant).
 //
 // Shape:
-//   - One symmetric 32-byte session key K per session.
-//   - K is wrapped per member via wallet.encryptForPeer(memberPub, K_bytes).
-//   - Wraps live in _keys.json under the session folder.
-//   - Each post body is AES-256-GCM encrypted with K (Web Crypto), fresh IV.
-//   - Server (and relay) only ever see ciphertext.
+//   - One symmetric 32-byte session key K per session (the TreeKEM group key).
+//   - K, or a per-message / per-document key, is wrapped to a peer's published
+//     public key: { ciphertext, iv, tag } as 0x-hex, unwrapped with the
+//     WRAPPER's public key by whoever holds the peer key (a rivet through its
+//     own capability, a derived server wallet through its key).
+//   - Content is { iv, ciphertext } as 0x-hex; bytes as an opaque Blob + iv.
+//   - Server and relay only ever see ciphertext.
+//
+// Resolved as `epistery/client/peer-cipher.mjs` in Node and, on the console's
+// pages, through the import map that points `epistery/client/` at `/lib/`.
 
-const E = () => window.ethers;
+import {
+  randomKey, wrapKey, unwrapKey, encryptText as encryptTextK, decryptText as decryptTextK,
+  encryptBytes, decryptBytes, fromHex,
+} from 'epistery/client/peer-cipher.mjs';
 
 // Random 32-byte key as 0x-hex.
-export function randomSessionKey() {
-  return E().utils.hexlify(crypto.getRandomValues(new Uint8Array(32)));
-}
+export function randomSessionKey() { return randomKey(); }
 
-// Wrap K to peer's chat.publicKey. Returns { ciphertext, iv, tag } as 0x-hex.
-export async function wrapSessionKey(K, peerPubKey, wallet) {
-  const ethers = E();
-  const keyBytes = ethers.utils.arrayify(K);
-  const { ciphertext, iv, tag } = await wallet.encryptForPeer(peerPubKey, keyBytes, ethers);
-  return {
-    ciphertext: ethers.utils.hexlify(ciphertext),
-    iv: ethers.utils.hexlify(iv),
-    tag: ethers.utils.hexlify(tag),
-  };
-}
+// Wrap K to a peer's published public key. Returns { ciphertext, iv, tag } as 0x-hex.
+export function wrapSessionKey(K, peerPubKey, wallet) { return wrapKey(K, peerPubKey, wallet); }
 
-// Unwrap K. wrapperPubKey is the public key of the address that produced the
-// wrap — for the owner-creates-session flow, that's the owner's pubkey,
-// surfaced in _keys.json's `wrapperPubKey` field.
-export async function unwrapSessionKey(wrap, wrapperPubKey, wallet) {
-  const ethers = E();
-  const ct = ethers.utils.arrayify(wrap.ciphertext);
-  const iv = ethers.utils.arrayify(wrap.iv);
-  const tag = ethers.utils.arrayify(wrap.tag);
-  const bytes = await wallet.decryptFromPeer(wrapperPubKey, ct, iv, tag, ethers);
-  return ethers.utils.hexlify(new Uint8Array(bytes));
-}
+// Unwrap K. wrapperPubKey is the public key of the device that produced the wrap.
+export function unwrapSessionKey(wrap, wrapperPubKey, wallet) { return unwrapKey(wrap, wrapperPubKey, wallet); }
 
-async function importAesKey(K) {
-  const keyBytes = E().utils.arrayify(K);
-  return crypto.subtle.importKey(
-    'raw', keyBytes, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
-  );
-}
-
-// Encrypt UTF-8 text with K. Returns { iv, ciphertext } as 0x-hex. Web
-// Crypto's AES-GCM emits ciphertext+auth-tag concatenated — we keep them
-// together in the `ciphertext` field rather than splitting.
-export async function encryptText(K, text) {
-  const ethers = E();
-  const aesKey = await importAesKey(K);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ctBuf = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(text)
-  );
-  return {
-    iv: ethers.utils.hexlify(iv),
-    ciphertext: ethers.utils.hexlify(new Uint8Array(ctBuf)),
-  };
-}
-
-export async function decryptText(K, blob) {
-  const ethers = E();
-  const aesKey = await importAesKey(K);
-  const iv = ethers.utils.arrayify(blob.iv);
-  const ct = ethers.utils.arrayify(blob.ciphertext);
-  const ptBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct);
-  return new TextDecoder().decode(new Uint8Array(ptBuf));
-}
+// Encrypt UTF-8 text with K → { iv, ciphertext } as 0x-hex (ct‖tag).
+export function encryptText(K, text) { return encryptTextK(K, text); }
+export function decryptText(K, blob) { return decryptTextK(K, blob); }
 
 // Binary-payload helpers — for the files plugin where hex-encoding the
 // ciphertext would double an arbitrarily large upload. The encrypted Blob
 // is always typed 'application/octet-stream' so the relay's /upload (which
 // accepts that mime as opaque .bin) takes it without inspection.
 export async function encryptBlob(K, source) {
-  const aesKey = await importAesKey(K);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const inputBuf = source instanceof ArrayBuffer
-    ? source
-    : await source.arrayBuffer();
-  const ctBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, inputBuf);
-  return {
-    blob: new Blob([ctBuf], { type: 'application/octet-stream' }),
-    iv: E().utils.hexlify(iv),
-  };
+  const inputBuf = source instanceof ArrayBuffer ? source : await source.arrayBuffer();
+  const { iv, ciphertext } = await encryptBytes(K, new Uint8Array(inputBuf));
+  return { blob: new Blob([ciphertext], { type: 'application/octet-stream' }), iv };
 }
 
 export async function decryptBlob(K, iv, source, mime = 'application/octet-stream') {
-  const aesKey = await importAesKey(K);
-  const inputBuf = source instanceof ArrayBuffer
-    ? source
-    : await source.arrayBuffer();
-  const ivBytes = E().utils.arrayify(iv);
-  const ptBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, aesKey, inputBuf);
-  return new Blob([ptBuf], { type: mime });
+  const inputBuf = source instanceof ArrayBuffer ? source : await source.arrayBuffer();
+  const pt = await decryptBytes(K, fromHex(iv), new Uint8Array(inputBuf));
+  return new Blob([pt], { type: mime });
 }

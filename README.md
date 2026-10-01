@@ -6,7 +6,7 @@ need by URL, plus one util the wiki plugin also uses server-side. Extracted from
 
 | module | environment | purpose |
 |---|---|---|
-| `cipher.mjs` | browser only | per-session content + wrap crypto — the **browser twin** of `@epistery/sessions` `bot-identity` |
+| `cipher.mjs` | browser + Node | per-session content + key wraps, over epistery core's one construction (`epistery/client/peer-cipher.mjs`); the server's `serverKeys` uses this same module |
 | `markup.mjs` | browser only | `MarkUp` — wiki markdown renderer (marked + Mermaid from CDN), WikiWord auto-linking |
 | `wikiwords.mjs` | **browser + Node** | pure WikiWord/reference extraction — served to the browser *and* imported by the wiki plugin's server code |
 | `componentry.mjs` | browser | the atomic-component base class (cloned+trimmed from @metric-im/componentry) — event hub, own-css injection, notification init |
@@ -60,20 +60,19 @@ browser and to the package file in Node — the same source either way.
 import { extractWikiWords } from '@epistery/client-lib/wikiwords';
 ```
 
-## Wire-compatibility invariant (do not break)
+## One cipher, in core
 
-`cipher.mjs` and `@epistery/sessions/bot-identity` are two halves of one wire
-format and MUST stay in lockstep:
-
-- **content:** AES-256-GCM, 12-byte IV, `ciphertext` = ciphertext‖tag (Web
-  Crypto's native output). A post encrypted in a browser decrypts on the server
-  (MCP boundary) and vice versa.
-- **wraps:** the epistery RivetWallet `encryptForPeer` primitive (ECDH secp256k1
-  → SHA-256 → AES-256-GCM). A wrap written by either side unwraps on the other.
-
-Changing one side's format without the other silently breaks every session.
+`cipher.mjs` implements nothing: a wrap (ECDH secp256k1 → SHA-256 → AES-256-GCM,
+`{ciphertext, iv, tag}`) and sealed content (AES-256-GCM under K, `{iv,
+ciphertext}` = ciphertext‖tag) are defined once in epistery core
+(`epistery/client/peer-cipher.mjs`), with vectors frozen against what is already
+stored. The browser page and a Node participant (`@epistery/sessions`
+`serverKeys`) run this same module, so nothing can drift. In the browser the
+console's import map resolves `epistery/client/` to `/lib/`.
 
 ## Dependencies
 
-None. `cipher.mjs` uses the page's `window.ethers` and Web Crypto; `markup.mjs`
-pulls marked/Mermaid from CDN at runtime; `wikiwords.mjs` is pure JS.
+- `epistery` (peer) — `client/peer-cipher.mjs` for the cipher, and a
+  `chainReader` is required to construct a `DsGroup`.
+- `ethers` v5 on `globalThis` in Node (the tree crypto and ECDH read it there);
+  the page provides `window.ethers`.
