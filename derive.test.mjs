@@ -20,6 +20,11 @@ assert.equal(args._refs, undefined, 'no plaintext, nothing derived');
 // an unknown function is a misdeclaration, not a guess
 assert.throws(() => deriveFields({ x: { from: 'body', fn: 'nope' } }, { body: 'a' }), /unknown derivation "nope"/);
 
+// a name from Object.prototype is no derivation — it would copy plaintext into an unsealed field
+for (const fn of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+  assert.throws(() => deriveFields({ leak: { from: 'body', fn } }, { body: 'secret' }), /unknown derivation/, `"${fn}" is refused`);
+}
+
 // no declaration is a no-op
 assert.deepEqual(deriveFields(undefined, { a: 1 }), { a: 1 });
 

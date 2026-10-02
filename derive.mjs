@@ -16,10 +16,16 @@
 
 import { extractWikiWords } from './wikiwords.mjs';
 
-/** The derivations a manifest may name. Each takes a string, returns a value. */
-export const DERIVATIONS = Object.freeze({
+/**
+ * The derivations a manifest may name. Each takes a string, returns a value.
+ * A null-prototype map, looked up by own property only: a name a manifest
+ * could not have meant — `constructor`, `toString` — is no derivation, not a
+ * function fished off Object.prototype that copies the plaintext somewhere the
+ * seal list does not cover.
+ */
+export const DERIVATIONS = Object.freeze(Object.assign(Object.create(null), {
   wikiwords: extractWikiWords,
-});
+}));
 
 /**
  * Apply a tool's `derive` declaration to its call arguments, in place.
@@ -29,7 +35,7 @@ export const DERIVATIONS = Object.freeze({
  */
 export function deriveFields(spec, args) {
   for (const [target, d] of Object.entries(spec || {})) {
-    const fn = DERIVATIONS[d?.fn];
+    const fn = typeof d?.fn === 'string' && Object.hasOwn(DERIVATIONS, d.fn) ? DERIVATIONS[d.fn] : null;
     if (!fn) throw new Error(`derive ${target}: unknown derivation "${d?.fn}" — this device holds no such function`);
     if (args[target] !== undefined) continue;
     const source = args[d.from];
