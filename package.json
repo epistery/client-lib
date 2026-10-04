@@ -60,7 +60,7 @@
   "license": "MIT",
   "author": "Rootz Corp",
   "peerDependencies": {
-    "ethers": "^5.8.0",
+    "ethers": "^5.8.0 || ^6.9.0",
     "epistery": ">=2.5.6"
   },
   "scripts": {
