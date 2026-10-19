@@ -241,8 +241,10 @@ export function relayClient(opts = {}) {
     },
     // Sessions an identity was granted into on OTHER contracts. 404 = none;
     // anything else throws, so "none" and "could not ask" never look alike.
-    async memberships(contract) {
-      const p = `/identity/${contract}/memberships`;
+    // `fresh` asks the chain past the relay's read cache — for the moment a grant
+    // is known to have just landed.
+    async memberships(contract, { fresh = false } = {}) {
+      const p = `/identity/${contract}/memberships${fresh ? '?fresh=1' : ''}`;
       const r = await send(p);
       if (r.status === 404) return [];
       if (!r.ok) throw await failed(p, r);
