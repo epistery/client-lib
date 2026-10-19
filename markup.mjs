@@ -9,6 +9,47 @@
 
 import { extractWikiWords, splitInlineCode } from './wikiwords.mjs';
 
+// Apply `fn` to the PROSE of a markdown body — every line outside a ``` / ~~~
+// fence, and within a line every segment outside an inline `code` span. One
+// walker, so WikiWords and @mentions agree on what is code and stays literal.
+function transformProse(body, fn) {
+  let newLines = [];
+  let skipping = false;
+  let fenceChar = null;
+  let fenceLength = 0;
+
+  for (let line of body.split('\n')) {
+    // Check for code fence start/end: ``` or ~~~, 3 or more chars
+    // A fence can be indented — inside a list item it always is. Group 1 is
+    // the run itself, group 2 its character, so the indent is not counted.
+    const fenceMatch = line.match(/^[ \t]*(([`~])\2{2,})/);
+
+    if (fenceMatch) {
+      if (!skipping) {
+        // Starting a code block
+        skipping = true;
+        fenceChar = fenceMatch[2];
+        fenceLength = fenceMatch[1].length;
+      } else if (fenceMatch[2] === fenceChar && fenceMatch[1].length >= fenceLength) {
+        // Ending a code block - must match the opening fence char and be at least as long
+        skipping = false;
+        fenceChar = null;
+        fenceLength = 0;
+      }
+      // Always push fence lines without processing
+      newLines.push(line);
+      continue;
+    }
+
+    if (!skipping) {
+      // Inline `code` spans stay literal — see splitInlineCode.
+      line = splitInlineCode(line).map((seg, i) => (i % 2 ? seg : fn(seg))).join('');
+    }
+    newLines.push(line);
+  }
+  return newLines.join('\n');
+}
+
 // WikiWord processor - converts CamelCase words to wiki links
 class WikiWord {
   constructor(basePath = '/wiki') {
@@ -16,59 +57,46 @@ class WikiWord {
   }
 
   process(body, currentDocId = '') {
-    let lines = body.split('\n');
-    let newLines = [];
-    let skipping = false;
-    let fenceChar = null;
-    let fenceLength = 0;
-
-    for (let line of lines) {
-      // Check for code fence start/end: ``` or ~~~, 3 or more chars
-      // A fence can be indented — inside a list item it always is. Group 1 is
-      // the run itself, group 2 its character, so the indent is not counted.
-      const fenceMatch = line.match(/^[ \t]*(([`~])\2{2,})/);
-
-      if (fenceMatch) {
-        if (!skipping) {
-          // Starting a code block
-          skipping = true;
-          fenceChar = fenceMatch[2];
-          fenceLength = fenceMatch[1].length;
-        } else if (fenceMatch[2] === fenceChar && fenceMatch[1].length >= fenceLength) {
-          // Ending a code block - must match the opening fence char and be at least as long
-          skipping = false;
-          fenceChar = null;
-          fenceLength = 0;
-        }
-        // Always push fence lines without processing
-        newLines.push(line);
-        continue;
-      }
-
-      if (!skipping) {
-        // Inline `code` spans stay literal — see splitInlineCode.
-        line = splitInlineCode(line).map((seg, i) => {
-          if (i % 2) return seg;
-          // To force a link not in camel case surround the word in brackets
-          // Skip image syntax (![...]) and existing markdown links ([...](...))
-          seg = seg.replace(/(?<!!)\[([A-Za-z0-9_]+)\](?!\()/g, (match, word) => {
-            return `[${word}](${this.basePath}/${word})`;
-          });
-          // Match CamelCase WikiWords, but avoid matching words already in markdown links
-          // The negative lookbehind (?<![[(]) prevents matching inside [text] or already-created [text](url)
-          seg = seg.replace(/(^|[^a-zA-Z0-9:_\-=.["'}{\\/[])([!A-Z][A-Z0-9]*[a-z][a-z0-9_]*[A-Z][A-Za-z0-9_]*)(?![^\[]*\])/g, (match, pre, word) => {
-            if (word.charAt(0) === '!') return pre + (word.slice(1));
-            else if (pre === "W:") return `[${word}](wikipedia.org?s=${word})`;
-            else if (pre === "G:") return `[${word}](google.com?s=${word})`;
-            else return `${pre}[${word}](${this.basePath}/${word})`;
-          });
-          return seg;
-        }).join('');
-      }
-      newLines.push(line);
-    }
-    return newLines.join('\n');
+    return transformProse(body, (seg) => {
+      // To force a link not in camel case surround the word in brackets
+      // Skip image syntax (![...]) and existing markdown links ([...](...))
+      seg = seg.replace(/(?<!!)\[([A-Za-z0-9_]+)\](?!\()/g, (match, word) => {
+        return `[${word}](${this.basePath}/${word})`;
+      });
+      // Match CamelCase WikiWords, but avoid matching words already in markdown links
+      // The negative lookbehind (?<![[(]) prevents matching inside [text] or already-created [text](url)
+      seg = seg.replace(/(^|[^a-zA-Z0-9:_\-=.["'}{\\/[])([!A-Z][A-Z0-9]*[a-z][a-z0-9_]*[A-Z][A-Za-z0-9_]*)(?![^\[]*\])/g, (match, pre, word) => {
+        if (word.charAt(0) === '!') return pre + (word.slice(1));
+        else if (pre === "W:") return `[${word}](wikipedia.org?s=${word})`;
+        else if (pre === "G:") return `[${word}](google.com?s=${word})`;
+        else return `${pre}[${word}](${this.basePath}/${word})`;
+      });
+      return seg;
+    });
   }
+}
+
+// @mentions — `@mjs` is how people write a name, and the @ is how this host
+// writes an identity's address (/@mjs). A mention links to that identity's page,
+// where the host resolves the name. Not after a word character (an email
+// address), a slash or a dot (a URL path), and not inside an existing [link].
+// A name may hold inner dots (a domain, @epistery.com) but never ends on one —
+// that is the sentence's full stop.
+const MENTION_RE = /(^|[^A-Za-z0-9_@./:\-])@([A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)(?![^\[]*\])/g;
+
+function linkMentions(seg) {
+  return seg.replace(MENTION_RE, (m, pre, name) => `${pre}[@${name}](#/@${encodeURIComponent(name)})`);
+}
+
+const escText = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/**
+ * Plain text → safe HTML with its @mentions linked — for the surfaces that show
+ * text, not markdown (a comment, a short message). The same rule as render().
+ */
+export function mentionHtml(text) {
+  return escText(text).replace(MENTION_RE, (m, pre, name) =>
+    `${pre}<a class="mention" href="#/@${encodeURIComponent(name)}">@${name}</a>`);
 }
 
 export default class MarkUp {
@@ -158,9 +186,9 @@ export default class MarkUp {
 
     // Process WikiWords first (properly skips code blocks now). Skipped
     // entirely for plugins that opted out (e.g. message-board posts).
-    const wordified = this.wikiWordEnabled
+    const wordified = transformProse(this.wikiWordEnabled
       ? this.wikiWord.process(body, options._pid)
-      : body;
+      : body, linkMentions);
 
     // Render markdown (this will convert ```mermaid to <pre><code class="language-mermaid">)
     let result = await this.marked.parse(wordified);
