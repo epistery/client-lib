@@ -94,9 +94,35 @@ function domainDocument({ domain, wallet, chainId, providerName, publicRpc, vers
       identity: { available: true, url: '/', accept: 'application/json' },
       // MCP is per SESSION and bearer-gated, not one endpoint for the domain, so
       // no url is advertised. Saying otherwise would send an agent nowhere.
-      mcp: { available: false, reason: 'per-session, issued from a session\'s Bot access settings' },
+      mcp: { available: false, reason: 'per-session: each session exposes /p/<kind>/<owner>/<id>/mcp, authenticated per the `authentication` block below — a session access key, or Authorization: Bot for a device holding its own rivet' },
       agents: { available: false },
       blockchain: { available: !!wallet },
+    },
+    // How a caller authenticates — the piece a manifest usually omits, leaving an
+    // agent to guess. The credential is a SIGNATURE, not a secret: the caller signs
+    // the request with its own wallet, the far side recovers the signer, and that
+    // signer's authority is read from the chain on every call. No token is issued or
+    // stored, so a grant is revoked the instant the chain says so and a captured
+    // header opens nothing else. A gated response names the scheme it wants
+    // (`WWW-Authenticate: Bot`), so a refusal is a next step, not a dead end.
+    authentication: {
+      schemes: ['bot', 'bearer', 'cookie'],
+      bot: {
+        header: 'Authorization: Bot <base64url envelope>',
+        description: "A per-request signature by the caller's device rivet, binding method + URI + audience host + body hash + timestamp + nonce. Stateless — no token, no cookie. The far side authorizes the recovered address against the resource's on-chain ACL.",
+        challenge: 'WWW-Authenticate: Bot',
+        recipe: '/.well-known/epistery/readme',
+        minEpisteryVersion: '2.3',
+      },
+      bearer: {
+        header: 'Authorization: Bearer <access-key>',
+        description: 'A per-session access key issued by a session admin. Transport only: it maps to a derived member address whose role is read on-chain per call, so a leaked key is not a leaked identity.',
+        scope: 'per-session',
+      },
+      cookie: {
+        description: "The _epistery session cookie from the /connect handshake — the browser's path, not presentable by a stateless client.",
+        scope: 'browser',
+      },
     },
     blockchain: wallet ? {
       chain: providerName || null,
