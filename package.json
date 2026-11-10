@@ -61,7 +61,7 @@
   "author": "Rootz Corp",
   "peerDependencies": {
     "ethers": "^5.8.0 || ^6.9.0",
-    "epistery": ">=2.5.6"
+    "epistery": "^2.6.2"
   },
   "scripts": {
     "test": "set -e; for f in *.test.mjs; do node \"$f\"; done"
@@ -72,6 +72,6 @@
   "homepage": "https://epistery.com",
   "devDependencies": {
     "ethers": "^5.8.0",
-    "epistery": "^2.5.6"
+    "epistery": "^2.6.2"
   }
 }
