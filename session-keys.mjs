@@ -24,6 +24,12 @@
 //   rivetAuthorized(contract, r) → whether `r` is a device of `contract`; THROWS when unread
 //   send(to, payload)            → a courier send to an address
 //   listSessions()               → the sessions this identity reaches (for requestAllKeys)
+//   log(entry)                   → optional: a structured record of every request
+//                                  outcome, so a stuck welcome is diagnosable. It
+//                                  carries only public postmark coordinates (owner,
+//                                  id, rivet, from, a role number, an error message)
+//                                  — never K, a private key or plaintext — and must
+//                                  never throw delivery off course.
 
 export const KEY_REQUEST_KIND = 'key-request';
 
@@ -39,7 +45,17 @@ export function keyRequest({ owner, id, rivet, pubkey }) {
 
 const lc = (a) => String(a || '').toLowerCase();
 
-export function keyDelivery({ me, openGroup, sectionRole, rivetAuthorized, send, listSessions }) {
+export function keyDelivery({ me, openGroup, sectionRole, rivetAuthorized, send, listSessions, log = () => {} }) {
+  // Report every request outcome in ONE shape. The "deferred forever" question had
+  // no evidence because nothing said WHICH branch deferred, and a chain that could
+  // not be READ looked identical to a genuine non-member. `report` fixes both: one
+  // reason per branch, and read-failures named apart from real negatives. It only
+  // records; it never changes the disposition it returns, and a throwing `log`
+  // cannot derail delivery.
+  const report = (disp, reason, ctx = {}) => {
+    try { log({ ev: 'key-request', disp, reason, ...ctx }); } catch { /* logging is never load-bearing */ }
+    return disp;
+  };
   // Ask the session's owner for K. Announced to the requester's OWN contract
   // first — a sister rivet is most likely to hold K and can trivially verify its
   // own device — with the session owner as the fallback servicer. Deduped: for a
@@ -73,25 +89,34 @@ export function keyDelivery({ me, openGroup, sectionRole, rivetAuthorized, send,
     async onMessage(rec) {
       const { owner, id, rivet, pubkey } = rec.data || {};
       const from = rec.from;
-      if (!owner || !id || !rivet || !pubkey) return 'rejected';   // malformed — the only terminal drop
+      if (!owner || !id || !rivet || !pubkey) return report('rejected', 'malformed', { from });   // the only terminal drop
       // Only a key-HOLDER can answer. If this device doesn't hold K, another of
       // the identity's devices might — leave the request open.
       let g;
-      try { g = await openGroup({ owner, id }); } catch { return 'defer'; }
-      if (g.pendingSeat || !g.groupKey?.()) return 'defer';
+      try { g = await openGroup({ owner, id }); }
+      catch (e) { return report('defer', 'group-open-failed', { owner, id, from, err: e?.message }); }
+      if (g.pendingSeat || !g.groupKey?.()) return report('defer', 'no-key-here', { owner, id, from, pendingSeat: !!g.pendingSeat });
       // Authorize the asker on the chain's word. A read that did not answer must
-      // NOT reject — that is exactly how a real member used to be dropped. Any
-      // uncertainty defers; the retry closes the gap when the chain answers.
-      try {
-        if ((await sectionRole(owner, id, from)) < 1) return 'defer';
-        if (lc(from) !== lc(rivet) && !(await rivetAuthorized(from, rivet))) return 'defer';
-      } catch { return 'defer'; }
+      // NOT reject — that is exactly how a real member used to be dropped. So a
+      // chain that could not be READ (a throw) is reported DISTINCTLY from a genuine
+      // role<1: a transient provider failure is never mistaken for a non-member,
+      // and the retry closes the gap when the chain answers.
+      let role;
+      try { role = await sectionRole(owner, id, from); }
+      catch (e) { return report('defer', 'role-read-failed', { owner, id, from, err: e?.message }); }
+      if (role < 1) return report('defer', 'asker-role-lt-1', { owner, id, from, role });
+      if (lc(from) !== lc(rivet)) {
+        let ok;
+        try { ok = await rivetAuthorized(from, rivet); }
+        catch (e) { return report('defer', 'rivet-read-failed', { owner, id, from, rivet, err: e?.message }); }
+        if (!ok) return report('defer', 'rivet-unauthorized', { owner, id, from, rivet });
+      }
       // Idempotent: a rivet that already HOLDS its leaf is done (a retry after a
       // successful seal, or a re-ask) — never a duplicate seat. Holds, not "is
       // named in the directory": a stale directory entry is a claim, not a seat.
-      if (g.isSeated(rivet)) return 'completed';
-      try { await g.addMember(rivet, pubkey); return 'completed'; }   // seal K to the asking device
-      catch (e) { console.warn('[session-keys] seal failed (will retry):', e.message); return 'defer'; }
+      if (g.isSeated(rivet)) return report('completed', 'already-seated', { owner, id, rivet });
+      try { await g.addMember(rivet, pubkey); return report('completed', 'sealed', { owner, id, rivet }); }   // seal K to the asking device
+      catch (e) { return report('defer', 'seal-failed', { owner, id, rivet, err: e?.message }); }
     },
   };
 
