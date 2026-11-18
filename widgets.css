@@ -1,0 +1,110 @@
+/* Epistery widgets — THE canonical presentation atoms.
+ *
+ * The companion to componentry's behavioural atoms (saveButton, Toast, Popup):
+ * those are Components because they DO something; these are pure presentation
+ * rendered inside templates, so their one-and-only definition is a class here,
+ * built on the semantic tokens in tokens.css. A button is ".btn", a chip is
+ * ".badge", a surface is ".card", a text input is ".field" — ONE owner each,
+ * theme-correct in light and dark for free (the tokens flip, these follow).
+ *
+ * The rule this file exists to enforce: NEVER restyle a bare `button`/`input`,
+ * NEVER redefine `.btn`/`.badge`/`.card`/`.field`, NEVER hardcode a colour.
+ * New code copies these bones; the widget-conformance guard (test/widgets.guard.mjs)
+ * fails loudly when something manufactures its own instead. The few literals below
+ * (white-on-status ink, shadow alphas) live HERE, in the canonical file, exactly
+ * as tokens.css holds its primitives — they are the owner, not a copy.
+ *
+ * Loaded once, globally, next to tokens.css (see index.html). Served at
+ * /lib/widgets.css. */
+
+/* ── BUTTON ───────────────────────────────────────────────────────────────
+   .btn            → the primary action (green fill, the dominant recipe)
+   .btn.ghost      → secondary (transparent, bordered)
+   .btn.danger     → destructive (status-error fill)
+   .btn.icon       → a bare glyph control (no fill, no border)
+   An <a class="btn"> reads the same as a <button class="btn">. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  border: 1px solid transparent;   /* keep the box the same width as .ghost so a toggle never reflows */
+  border-radius: 8px;
+  padding: 8px 16px;
+  font: inherit;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:disabled, .btn.is-disabled { opacity: 0.5; cursor: default; filter: none; }
+
+.btn.ghost { background: transparent; color: var(--primary); border-color: var(--page-border); }
+.btn.ghost:hover { filter: none; border-color: var(--primary); }
+
+.btn.danger { background: var(--status-error); color: #fff; border-color: transparent; }
+
+.btn.icon {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  border-radius: 8px;
+  padding: 6px;
+  gap: 0;
+}
+.btn.icon:hover { filter: none; color: var(--text-color); background: var(--page-action); }
+
+/* ── BADGE ────────────────────────────────────────────────────────────────
+   A small status / category chip. Default is quiet (muted). A tone class tints
+   it: the text is the tone token, the fill a low-alpha mix of it over the page,
+   so the same chip reads on either ground with no per-theme rule. */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--page-border);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: transparent;
+  text-decoration: none;
+}
+a.badge:hover { filter: brightness(1.06); }
+.badge.quiet { color: var(--text-muted); border-color: var(--page-border); }
+
+.badge.primary { color: var(--primary); border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.badge.success { color: var(--status-success); border-color: color-mix(in srgb, var(--status-success) 45%, transparent); background: color-mix(in srgb, var(--status-success) 14%, transparent); }
+.badge.warning { color: var(--status-warning); border-color: color-mix(in srgb, var(--status-warning) 45%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); }
+.badge.error   { color: var(--status-error);   border-color: color-mix(in srgb, var(--status-error) 45%, transparent);   background: color-mix(in srgb, var(--status-error) 14%, transparent); }
+.badge.info    { color: var(--status-info);    border-color: color-mix(in srgb, var(--status-info) 45%, transparent);    background: color-mix(in srgb, var(--status-info) 14%, transparent); }
+
+/* ── CARD ─────────────────────────────────────────────────────────────────
+   A raised surface above the page ground. One radius, one border, one shadow. */
+.card {
+  background: var(--bg-color);
+  color: var(--text-color);
+  border: 1px solid var(--page-border);
+  border-radius: 14px;
+  padding: var(--spacer2) var(--spacer3);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* ── FIELD ────────────────────────────────────────────────────────────────
+   A text input / select / textarea. Apply to the element: <input class="field">. */
+.field {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--page-border);
+  border-radius: 8px;
+  font: inherit;
+  color: var(--text-color);
+  background: var(--bg-color);
+}
+textarea.field { resize: vertical; }
+.field:focus { outline: none; border-color: var(--primary); }
+.field::placeholder { color: var(--text-muted); }

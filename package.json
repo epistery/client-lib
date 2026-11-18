@@ -49,6 +49,7 @@
     "session-keys.mjs",
     "owner-seats.mjs",
     "adslot.mjs",
+    "widgets.css",
     "components/",
     "README.md",
     "LICENSE"
