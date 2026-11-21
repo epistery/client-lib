@@ -8,6 +8,7 @@
     "./cipher": "./cipher.mjs",
     "./markup": "./markup.mjs",
     "./wikiwords": "./wikiwords.mjs",
+    "./search": "./search.mjs",
     "./componentry": "./componentry.mjs",
     "./IdForge": "./IdForge.mjs",
     "./Toast": "./Toast.mjs",

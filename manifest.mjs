@@ -81,12 +81,23 @@ export function manifestMessage({ domain, hash }) {
 // The document itself. Deliberately narrow: it claims only what the serving
 // origin actually offers. A manifest that overstates its capabilities is the
 // same class of error as a signature block with no signature.
-function domainDocument({ domain, wallet, chainId, providerName, publicRpc, version, platform, searchUrl }) {
+function domainDocument({ domain, wallet, chainId, providerName, publicRpc, version, platform, searchUrl, license }) {
   return {
     specVersion: SPEC_VERSION,
     standard: 'AI Discovery Standard v1.2',
     generated: new Date().toISOString(),
     identity: { name: domain, domain, platform, version: version || null },
+    // LICENSE — one of the three origin facts (ID is blockchain.wallet, README is
+    // well_known/readme). Always present, so a reader never has to know the
+    // convention "an absent field means reserved": the field STATES it. Silence is
+    // not a grant — an undeclared origin is all-rights-reserved (AuthorsDeclare), and
+    // a blank/null here would read as permissive, so the honest default says so in
+    // words. A declared value is the public spec's URI (SPDX / Creative Commons),
+    // resolved from the identity's `terms` — the SAME source the `rel="license"` Link
+    // header reads, never a second copy.
+    license: license
+      ? (typeof license === 'string' ? { declared: true, url: license } : { declared: true, ...license })
+      : { declared: false, effect: 'all-rights-reserved', note: 'No license declared; under default copyright all rights are reserved. The presence of this field is not a grant.' },
     capabilities: {
       search: searchUrl ? { available: true, url: searchUrl } : { available: false },
       // The identity probe: this origin's own wallet, which is what verifies both
@@ -148,9 +159,13 @@ function domainDocument({ domain, wallet, chainId, providerName, publicRpc, vers
  *        honest: no `_signature` block at all rather than an empty one.
  * @param {string} [p.platform]   what serves it (default 'epistery-console')
  * @param {string} [p.searchUrl]  the origin's search surface, if it has one
+ * @param {string|object} [p.license]  the declared terms (SPDX/CC spec URL, or an
+ *        object), from the identity's `terms` — the SAME source the `rel="license"`
+ *        Link header reads. Omitted → the manifest states all-rights-reserved
+ *        explicitly; silence is not a grant.
  */
-export async function buildManifest({ domain, signer, chainId, providerName, publicRpc, version, platform = 'epistery-console', searchUrl = null }) {
-  const doc = domainDocument({ domain, wallet: signer?.address || null, chainId, providerName, publicRpc, version, platform, searchUrl });
+export async function buildManifest({ domain, signer, chainId, providerName, publicRpc, version, platform = 'epistery-console', searchUrl = null, license = null }) {
+  const doc = domainDocument({ domain, wallet: signer?.address || null, chainId, providerName, publicRpc, version, platform, searchUrl, license });
   if (!signer?.signMessage) return doc;
   const hash = await contentHash(doc);
   doc._signature = {
