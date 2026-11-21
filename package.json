@@ -33,6 +33,7 @@
     "cipher.mjs",
     "markup.mjs",
     "wikiwords.mjs",
+    "search.mjs",
     "componentry.mjs",
     "IdForge.mjs",
     "Toast.mjs",
